@@ -11,6 +11,14 @@ import type { AgentKind, RetryNowConfig } from './types.ts'
 
 export const AGENT_KINDS: readonly AgentKind[] = ['opencode', 'codex', 'claude']
 
+/** Type guard for `AgentKind`. Use at JSON/CLI boundaries instead of `as AgentKind`. */
+export function isAgentKind(value: unknown): value is AgentKind {
+  return (
+    typeof value === 'string' &&
+    (AGENT_KINDS as readonly string[]).includes(value)
+  )
+}
+
 export const DEFAULT_THRESHOLD = 5
 export const DEFAULT_MAX_ITERATIONS = 50
 export const DEFAULT_REVERT_THRESHOLD = 3
@@ -46,12 +54,13 @@ function int(value: unknown, fallback: number): number {
 
 /** Normalise + validate raw input into a trustworthy config (throws on hard errors). */
 export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
-  const agent = (raw.agent ?? DEFAULTS.agent) as AgentKind
-  if (!AGENT_KINDS.includes(agent)) {
+  const agentRaw = raw.agent ?? DEFAULTS.agent
+  if (!isAgentKind(agentRaw)) {
     throw new ConfigError(
       `agent must be one of ${AGENT_KINDS.join(', ')} (got "${String(raw.agent)}")`,
     )
   }
+  const agent: AgentKind = agentRaw
 
   const analysis = (raw.analysis ?? '').trim()
   const direction = (raw.direction ?? '').trim()

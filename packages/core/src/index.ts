@@ -15,6 +15,7 @@ export {
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
   DEFAULTS,
+  isAgentKind,
   loadConfig,
   normalizeConfig,
 } from './config.ts'

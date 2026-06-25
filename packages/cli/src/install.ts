@@ -6,7 +6,12 @@
  */
 import { resolve } from 'node:path'
 
-import { AGENT_KINDS, type AgentKind, installFrontend } from '@retry-now/core'
+import {
+  AGENT_KINDS,
+  type AgentKind,
+  installFrontend,
+  isAgentKind,
+} from '@retry-now/core'
 
 export async function runInstall(
   cliEntry: string,
@@ -14,14 +19,14 @@ export async function runInstall(
   cwd: string,
   personal: boolean,
 ): Promise<number> {
-  const agent = agentRaw as AgentKind
-  if (!agentRaw || !AGENT_KINDS.includes(agent)) {
+  if (!isAgentKind(agentRaw)) {
     console.error(
       `설치 대상은 ${AGENT_KINDS.join(' | ')} 중 하나여야 한다 (받음: "${agentRaw}").`,
     )
     console.error('예) retry-now install claude')
     return 1
   }
+  const agent: AgentKind = agentRaw
 
   // Bake `bun "<cliEntry>" run` as the driver. installFrontend appends --cwd for project
   // installs and resolves the per-agent destination path + invocation syntax.
