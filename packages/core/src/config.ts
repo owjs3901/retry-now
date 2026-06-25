@@ -52,6 +52,14 @@ function int(value: unknown, fallback: number): number {
   return Number.isFinite(n) ? Math.trunc(n) : fallback
 }
 
+function str(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function bool(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
 /** Normalise + validate raw input into a trustworthy config (throws on hard errors). */
 export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
   const agentRaw = raw.agent ?? DEFAULTS.agent
@@ -62,9 +70,9 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
   }
   const agent: AgentKind = agentRaw
 
-  const analysis = (raw.analysis ?? '').trim()
-  const direction = (raw.direction ?? '').trim()
-  const completion = (raw.completion ?? '').trim()
+  const analysis = str(raw.analysis, '').trim()
+  const direction = str(raw.direction, '').trim()
+  const completion = str(raw.completion, '').trim()
   if (!analysis)
     throw new ConfigError('analysis (분석 및 계획) must not be empty')
   if (!direction)
@@ -89,20 +97,20 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
   return {
     version: 1,
     agent,
-    model: (raw.model ?? '').trim(),
-    agentProfile: (raw.agentProfile ?? '').trim(),
+    model: str(raw.model, '').trim(),
+    agentProfile: str(raw.agentProfile, '').trim(),
     analysis,
     direction,
     completion,
     threshold,
     revertThreshold,
     maxIterations,
-    skipPermissions: raw.skipPermissions ?? true,
-    commitPerIteration: raw.commitPerIteration ?? true,
-    verifyEnabled: raw.verifyEnabled ?? false,
-    verifyTest: (raw.verifyTest ?? '').trim(),
-    verifyLint: (raw.verifyLint ?? '').trim(),
-    benchCommand: (raw.benchCommand ?? '').trim(),
+    skipPermissions: bool(raw.skipPermissions, true),
+    commitPerIteration: bool(raw.commitPerIteration, true),
+    verifyEnabled: bool(raw.verifyEnabled, false),
+    verifyTest: str(raw.verifyTest, '').trim(),
+    verifyLint: str(raw.verifyLint, '').trim(),
+    benchCommand: str(raw.benchCommand, '').trim(),
     benchRuns,
     targets: Array.isArray(raw.targets)
       ? raw.targets
