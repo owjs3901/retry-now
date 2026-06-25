@@ -5,9 +5,7 @@
  * README, ledger header and `.gitignore` are always (re)generated so editing the config and
  * re-running keeps the prompts in sync.
  */
-import { join } from 'node:path'
-
-import { ensureDir, exists, readText, writeJson, writeText } from './io.ts'
+import { ensureDir, exists, writeJson, writeText } from './io.ts'
 import type { Paths } from './paths.ts'
 import { DIR, resolvePaths } from './paths.ts'
 import { buildAnalyzePrompt, buildImprovePrompt } from './prompts.ts'
@@ -35,28 +33,6 @@ export async function writePrompts(
     paths.improvePrompt,
     buildImprovePrompt(config, stateDirRel, scope),
   )
-}
-
-/** Ensure the TARGET project's root .gitignore lists `.retry-now/` (idempotent). */
-async function ensureRootGitignore(root: string): Promise<void> {
-  const file = join(root, '.gitignore')
-  const existing = (await readText(file)) ?? ''
-  const alreadyListed = existing
-    .split(/\r?\n/)
-    .map((l) => l.trim().replace(/^\//, '').replace(/\/+$/, ''))
-    .some((l) => l === '.retry-now')
-  if (alreadyListed) return
-  if (existing.length === 0) {
-    await writeText(
-      file,
-      '# retry-now runtime loop state (local only)\n.retry-now/\n',
-    )
-  } else {
-    await writeText(
-      file,
-      `${existing}${existing.endsWith('\n') ? '' : '\n'}.retry-now/\n`,
-    )
-  }
 }
 
 export const LEDGER_HEADER = `# Improvement Ledger (human-facing history)
@@ -143,11 +119,10 @@ export async function scaffold(
     await ensureDir(d)
   }
 
-  // The whole runtime dir is local-only by user spec: a single `*` ignores everything.
+  // The whole runtime dir is local-only: a single `*` ignores everything inside the folder
+  // (this `.gitignore` itself included), so git never tracks `.retry-now/`. The project's root
+  // `.gitignore` is intentionally left untouched — the inner ignore already fully covers it.
   await writeText(paths.gitignore, '*\n')
-  // Also list it in the project's root .gitignore so git never tracks it even if the inner
-  // ignore is removed — and so the per-iteration commits never accidentally include it.
-  await ensureRootGitignore(paths.root)
 
   if (writeConfig || !(await exists(paths.config))) {
     await writeJson(paths.config, config)

@@ -185,6 +185,11 @@ Per-iteration git commits are ON. After the decision gate, ONLY if you KEPT the 
   one the SAME \`retry-now#<PADDED>: \` prefix.
 - Commit ONLY the files you modified for this improvement. Do NOT \`git add\` the \`${DIR}/\`
   directory (it is gitignored) or unrelated pre-existing working-tree changes.
+- This loop runs UNATTENDED — no human is present to enter a commit-signing passphrase. If a commit
+  fails or stalls because of commit signing (\`commit.gpgsign\`, GPG or SSH signing — e.g.
+  \`gpg failed to sign the data\`, \`No secret key\`, or a pinentry/passphrase prompt), retry the
+  SAME commit once with \`--no-gpg-sign\` (e.g. \`git commit --no-gpg-sign -m "retry-now#<PADDED>: …"\`)
+  so signing can never block the iteration. Landing the change matters more than the signature here.
 - If you REVERTED or FAILED, do NOT commit.
 `
     : `
