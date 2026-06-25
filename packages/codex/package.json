@@ -1,0 +1,21 @@
+{
+  "name": "@retry-now/codex",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "retry-now integration for Codex CLI — installs a $retry-now skill that launches the reincarnation loop.",
+  "bin": {
+    "retry-now-codex": "./src/index.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@retry-now/core": "workspace:*"
+  },
+  "files": [
+    "src"
+  ]
+}

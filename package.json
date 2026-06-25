@@ -1,0 +1,25 @@
+{
+  "name": "retry-now",
+  "private": true,
+  "type": "module",
+  "version": "0.2.0",
+  "description": "지금 바로 윤회 — 컨텍스트가 매 이터레이션마다 0으로 리셋되는 자율 개선 루프(loop-engineering) 엔진. opencode / codex / claude code 공용.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "bun run --filter '*' typecheck",
+    "build": "bun run --filter '*' build",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "eslint-plugin-devup": "^2.0.19",
+    "oxlint": "^1.69.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

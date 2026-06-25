@@ -1,0 +1,113 @@
+/**
+ * Config defaults, normalisation and validation.
+ *
+ * `init` collects raw user input; everything else in the engine consumes a fully-validated
+ * `RetryNowConfig`. Keep this the single choke point so the driver never sees a half-formed
+ * config (e.g. threshold = 0, which would "converge" instantly).
+ */
+import { readJson } from './io.ts'
+import { resolvePaths } from './paths.ts'
+import type { AgentKind, RetryNowConfig } from './types.ts'
+
+export const AGENT_KINDS: readonly AgentKind[] = ['opencode', 'codex', 'claude']
+
+export const DEFAULT_THRESHOLD = 5
+export const DEFAULT_MAX_ITERATIONS = 50
+export const DEFAULT_REVERT_THRESHOLD = 3
+export const DEFAULT_BENCH_RUNS = 5
+
+export const DEFAULTS: RetryNowConfig = {
+  version: 1,
+  agent: 'opencode',
+  model: '',
+  agentProfile: '',
+  analysis: '',
+  direction: '',
+  completion: '',
+  threshold: DEFAULT_THRESHOLD,
+  revertThreshold: DEFAULT_REVERT_THRESHOLD,
+  maxIterations: DEFAULT_MAX_ITERATIONS,
+  skipPermissions: true,
+  commitPerIteration: true,
+  verifyEnabled: false,
+  verifyTest: '',
+  verifyLint: '',
+  benchCommand: '',
+  benchRuns: DEFAULT_BENCH_RUNS,
+  targets: [],
+}
+
+export class ConfigError extends Error {}
+
+function int(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? Math.trunc(n) : fallback
+}
+
+/** Normalise + validate raw input into a trustworthy config (throws on hard errors). */
+export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
+  const agent = (raw.agent ?? DEFAULTS.agent) as AgentKind
+  if (!AGENT_KINDS.includes(agent)) {
+    throw new ConfigError(
+      `agent must be one of ${AGENT_KINDS.join(', ')} (got "${String(raw.agent)}")`,
+    )
+  }
+
+  const analysis = (raw.analysis ?? '').trim()
+  const direction = (raw.direction ?? '').trim()
+  const completion = (raw.completion ?? '').trim()
+  if (!analysis)
+    throw new ConfigError('analysis (분석 및 계획) must not be empty')
+  if (!direction)
+    throw new ConfigError('direction (개선 방향) must not be empty')
+  if (!completion)
+    throw new ConfigError('completion (완료 체크) must not be empty')
+
+  const threshold = int(raw.threshold, DEFAULT_THRESHOLD)
+  if (threshold < 1)
+    throw new ConfigError('threshold (수렴 임계값) must be >= 1')
+
+  const revertThreshold = int(raw.revertThreshold, DEFAULT_REVERT_THRESHOLD)
+  if (revertThreshold < 1)
+    throw new ConfigError('revertThreshold (리버트 수렴 임계값) must be >= 1')
+
+  const maxIterations = int(raw.maxIterations, DEFAULT_MAX_ITERATIONS)
+  if (maxIterations < 1) throw new ConfigError('maxIterations must be >= 1')
+
+  const benchRuns = int(raw.benchRuns, DEFAULT_BENCH_RUNS)
+  if (benchRuns < 1) throw new ConfigError('benchRuns must be >= 1')
+
+  return {
+    version: 1,
+    agent,
+    model: (raw.model ?? '').trim(),
+    agentProfile: (raw.agentProfile ?? '').trim(),
+    analysis,
+    direction,
+    completion,
+    threshold,
+    revertThreshold,
+    maxIterations,
+    skipPermissions: raw.skipPermissions ?? true,
+    commitPerIteration: raw.commitPerIteration ?? true,
+    verifyEnabled: raw.verifyEnabled ?? false,
+    verifyTest: (raw.verifyTest ?? '').trim(),
+    verifyLint: (raw.verifyLint ?? '').trim(),
+    benchCommand: (raw.benchCommand ?? '').trim(),
+    benchRuns,
+    targets: Array.isArray(raw.targets)
+      ? raw.targets
+          .filter((t): t is string => typeof t === 'string')
+          .map((t) => t.trim().replace(/\\/g, '/').replace(/\/+$/, ''))
+          .filter((t) => t !== '')
+      : [],
+  }
+}
+
+/** Load + validate the on-disk config for a project. Returns null if none exists. */
+export async function loadConfig(root: string): Promise<RetryNowConfig | null> {
+  const paths = resolvePaths(root)
+  const raw = await readJson<Partial<RetryNowConfig>>(paths.config)
+  if (!raw) return null
+  return normalizeConfig(raw)
+}

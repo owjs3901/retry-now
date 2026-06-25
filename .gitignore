@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# runtime loop state (when retry-now is used on THIS repo itself)
+.retry-now/
+
+# logs / os
+*.log
+.DS_Store
+Thumbs.db
+
+# the reference prototype that retry-now generalizes from is kept;
+# but its transient runtime is ignored
+.loop
+.omo

@@ -1,0 +1,626 @@
+/**
+ * The loop driver — 윤회를 돌리는 자.
+ *
+ * Sole owner of the cross-life control state (the consecutive no-improvement streak). Each
+ * phase spawns a FRESH agent session (context reset to 0) and injects NO prior results, so a
+ * fresh ANALYZE cannot be biased by past conclusions. Stops when:
+ *   - ANALYZE returns `no_improvements` for `threshold` consecutive lives → converged (맺어짐)
+ *   - the safety cap `maxIterations` is reached
+ *   - a `.retry-now/STOP` sentinel appears (manual; state persists, rerun to resume)
+ *   - an agent fails to emit a valid signal twice in a row → error
+ *
+ * Monorepo (분할) mode: when `config.targets` is non-empty, the driver runs an INDEPENDENT loop
+ * per target — each with its own state/reports/ledger/summary under `.retry-now/targets/<slug>/`
+ * and prompts scoped to that package — then writes an overall summary at the root.
+ */
+import { spawn } from 'node:child_process'
+import { createWriteStream } from 'node:fs'
+import { join } from 'node:path'
+
+import { AGENT_LABEL, buildAgentCommand } from './agents.ts'
+import { loadConfig } from './config.ts'
+import {
+  appendLine,
+  ensureDir,
+  exists,
+  nowIso,
+  readText,
+  writeJson,
+  writeText,
+} from './io.ts'
+import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
+import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
+import { beginPhase, readSignal } from './signal.ts'
+import {
+  loadState,
+  recordNoImprovement,
+  recordRevert,
+  resetRevertStreak,
+  resetStreak,
+  saveState,
+} from './state.ts'
+import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
+import type { LoopState, Phase, RetryNowConfig, Signal } from './types.ts'
+import type { DriverOptions } from './types.ts'
+
+function composeMessage(
+  iter: number,
+  phase: Phase,
+  stateDirRel: string,
+  scope: string,
+): string {
+  const padded = pad(iter)
+  const scopeHint = scope
+    ? ` SCOPE: restrict ALL analysis and changes strictly to the path "${scope}".`
+    : ''
+  return (
+    `retry-now reincarnation. Iteration ${iter}, phase ${phase.toUpperCase()} (id ${padded}). ` +
+    `You are a FRESH session with NO memory of any prior life.${scopeHint} ` +
+    `Read and obey ${stateDirRel}/prompts/${phase}.md EXACTLY. ` +
+    `Your FINAL action MUST be overwriting ${stateDirRel}/signal.json exactly as that file specifies.`
+  )
+}
+
+/** Spawn an agent CLI, tee its output to a log file, resolve with the exit code. */
+function runAgent(
+  cmd: string,
+  args: readonly string[],
+  cwd: string,
+  logPath: string,
+  log: (line: string) => void,
+): Promise<number> {
+  return new Promise((resolve) => {
+    const out = createWriteStream(logPath, { flags: 'a' })
+    const child = spawn(cmd, [...args], {
+      cwd,
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    // Send an immediate EOF on stdin: headless agents must not block waiting for input, and a
+    // closed pipe is more robust on Windows than mapping stdin to the NUL device ('ignore').
+    child.stdin?.end()
+    child.stdout.on('data', (d: Buffer) => out.write(d))
+    child.stderr.on('data', (d: Buffer) => out.write(d))
+    child.on('error', (err) => {
+      log(`  ! spawn failed: ${err.message}`)
+      out.end()
+      resolve(-1)
+    })
+    child.on('close', (code) => {
+      out.end()
+      resolve(code ?? -1)
+    })
+  })
+}
+
+/** Synthetic signal used by --dry-run to exercise the full control flow without an agent. */
+function synthSignal(iter: number, phase: Phase): Signal {
+  if (phase === 'analyze') {
+    const found = iter === 1 // life 1 finds one improvement; later lives find none → converge
+    return {
+      iteration: iter,
+      phase,
+      result: found ? 'improvements_found' : 'no_improvements',
+      report: `(dry-run)`,
+      nextImprovement: found ? '(dry-run improvement)' : '',
+      summary: '(dry-run)',
+      timestamp: nowIso(),
+    }
+  }
+  return {
+    iteration: iter,
+    phase,
+    result: 'applied',
+    report: '(dry-run)',
+    metricDelta: '(dry-run)',
+    summary: '(dry-run)',
+    timestamp: nowIso(),
+  }
+}
+
+async function runPhase(
+  paths: Paths,
+  config: RetryNowConfig,
+  iter: number,
+  phase: Phase,
+  opts: DriverOptions,
+  log: (line: string) => void,
+  stateDirRel: string,
+  scope: string,
+): Promise<Signal | null> {
+  await beginPhase(paths, iter, phase, scope)
+
+  if (opts.dryRun) {
+    await writeJson(paths.signal, synthSignal(iter, phase))
+  } else {
+    const { cmd, args } = buildAgentCommand(
+      config,
+      composeMessage(iter, phase, stateDirRel, scope),
+    )
+    const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
+    log(`  ↳ ${AGENT_LABEL[config.agent]} ${phase} (fresh session)…`)
+    const code = await runAgent(cmd, args, paths.root, logPath, log)
+    if (code !== 0) log(`  ! agent exited with code ${code} (see ${logPath})`)
+  }
+
+  return readSignal(paths, iter, phase)
+}
+
+const PHASE_ATTEMPTS = 3
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Actionable guidance shown when an agent fails to produce a valid signal (likely a crash). */
+function logCrashGuidance(
+  log: (line: string) => void,
+  config: RetryNowConfig,
+  paths: Paths,
+): void {
+  log(
+    `  에이전트(${AGENT_LABEL[config.agent]})가 유효한 신호를 내지 못했습니다 — 크래시(예: Bun segfault)일 수 있습니다.`,
+  )
+  log(`  • 로그 확인: ${paths.logsDir}`)
+  log(
+    `  • 다시 \`retry-now run\` 하면 마지막 상태부터 이어집니다(매 생은 컨텍스트 0이라 재시도가 안전).`,
+  )
+  log(
+    `  • 계속 크래시하면 config의 agent를 codex/claude로 바꾸거나 opencode/bun을 업데이트하세요.`,
+  )
+  log(
+    `  • opencode 안에서 /retry-now로 중첩 실행하기보다 별도 터미널의 \`retry-now run\`이 더 안정적입니다.`,
+  )
+}
+
+/**
+ * Run a phase, retrying in a fresh session if the agent crashed or emitted no valid signal.
+ * Agent processes (opencode / codex / claude) occasionally crash mid-run — e.g. a Bun
+ * segmentation fault — and a fresh retry usually recovers. Each iteration is context-0, so
+ * re-running is always safe.
+ */
+async function runPhaseResilient(
+  paths: Paths,
+  config: RetryNowConfig,
+  iter: number,
+  phase: Phase,
+  opts: DriverOptions,
+  log: (line: string) => void,
+  stateDirRel: string,
+  scope: string,
+): Promise<Signal | null> {
+  for (let attempt = 1; attempt <= PHASE_ATTEMPTS; attempt++) {
+    const sig = await runPhase(
+      paths,
+      config,
+      iter,
+      phase,
+      opts,
+      log,
+      stateDirRel,
+      scope,
+    )
+    if (sig) return sig
+    if (attempt < PHASE_ATTEMPTS) {
+      log(
+        `  ! ${phase}: no valid signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — the agent may have crashed. Retrying in a fresh session…`,
+      )
+      await delay(2000)
+    }
+  }
+  return null
+}
+
+async function appendHistory(
+  paths: Paths,
+  iter: number,
+  phase: Phase,
+  sig: Signal,
+): Promise<void> {
+  await appendLine(
+    paths.history,
+    JSON.stringify({
+      at: nowIso(),
+      iteration: iter,
+      phase,
+      result: sig.result,
+      summary: sig.summary,
+      report: sig.report,
+      ...(sig.nextImprovement ? { nextImprovement: sig.nextImprovement } : {}),
+      ...(sig.metricDelta ? { metricDelta: sig.metricDelta } : {}),
+    }),
+  )
+}
+
+interface HistoryEntry {
+  at?: string
+  iteration: number
+  phase: Phase
+  result: string
+  summary?: string
+  report?: string
+  nextImprovement?: string
+  metricDelta?: string
+}
+
+function escCell(s: string): string {
+  return s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').slice(0, 100)
+}
+
+/** Compose a single loop's comprehensive report (summary.md) from its history. */
+async function writeSummary(
+  paths: Paths,
+  state: LoopState,
+  config: RetryNowConfig,
+  target?: string,
+): Promise<void> {
+  const raw = (await readText(paths.history)) ?? ''
+  const entries: HistoryEntry[] = []
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t) continue
+    try {
+      entries.push(JSON.parse(t) as HistoryEntry)
+    } catch {
+      /* skip malformed line */
+    }
+  }
+  const improves = entries.filter((e) => e.phase === 'improve')
+  const applied = improves.filter((e) => e.result === 'applied')
+  const reverted = improves.filter(
+    (e) => e.result === 'applied_reverted',
+  ).length
+  const failed = improves.filter((e) => e.result === 'failed').length
+  const analyzeNo = entries.filter(
+    (e) => e.phase === 'analyze' && e.result === 'no_improvements',
+  ).length
+  const analyzeYes = entries.filter(
+    (e) => e.phase === 'analyze' && e.result === 'improvements_found',
+  ).length
+
+  const out: string[] = [
+    target
+      ? `# retry-now — 윤회 종합 보고서: ${target}`
+      : '# retry-now — 윤회 종합 보고서 (summary)',
+    '',
+    ...(target ? [`- target: \`${target}\``] : []),
+    `- status: **${state.status}**`,
+    `- iterations: ${state.iteration}`,
+    `- final streak: ${state.noImprovementStreak}/${config.threshold}`,
+    `- final revert-streak: ${state.revertStreak}/${config.revertThreshold}`,
+    `- agent: ${config.agent}${config.model ? ` (${config.model})` : ''}`,
+    `- commit-per-iteration: ${config.commitPerIteration ? 'on' : 'off'}`,
+    `- started: ${state.startedAt}`,
+    `- ended: ${state.updatedAt}`,
+    '',
+    '## 집계',
+    `- analyze: 개선발견 ${analyzeYes} · 개선없음 ${analyzeNo}`,
+    `- improve: applied ${applied.length} · reverted ${reverted} · failed ${failed}`,
+    '',
+  ]
+
+  if (applied.length > 0) {
+    out.push('## 적용된 개선 (KEEP)')
+    for (const e of applied) {
+      out.push(
+        `- [${pad(e.iteration)}] ${escCell(e.summary ?? '')}${e.metricDelta ? ` — \`${escCell(e.metricDelta)}\`` : ''}`,
+      )
+    }
+    out.push('')
+  }
+
+  out.push(
+    '## 이터레이션 로그',
+    '',
+    '| iter | phase | result | note |',
+    '|---|---|---|---|',
+  )
+  for (const e of entries) {
+    const note =
+      e.phase === 'analyze'
+        ? (e.nextImprovement ?? e.summary ?? '')
+        : (e.metricDelta ?? e.summary ?? '')
+    out.push(
+      `| ${pad(e.iteration)} | ${e.phase} | ${e.result} | ${escCell(note)} |`,
+    )
+  }
+  out.push(
+    '',
+    `상세: \`${paths.reportsDir}\`, \`${paths.ledger}\`, \`${paths.history}\``,
+    '',
+  )
+
+  await writeText(paths.summary, out.join('\n'))
+}
+
+/** Aggregate per-target results into the root summary.md (per-package mode). */
+async function writeOverallSummary(
+  root: string,
+  config: RetryNowConfig,
+  results: readonly { target: string; result: DriverResult }[],
+): Promise<void> {
+  const paths = resolvePaths(root)
+  const out: string[] = [
+    '# retry-now — 전체 윤회 종합 보고서 (overall)',
+    '',
+    `- mode: per-package (분할 윤회) — ${results.length} target(s)`,
+    `- agent: ${config.agent}${config.model ? ` (${config.model})` : ''}`,
+    `- threshold: ${config.threshold}`,
+    '',
+    '## 타겟별 결과',
+    '',
+    '| target | status | iterations | streak |',
+    '|---|---|---|---|',
+  ]
+  for (const r of results) {
+    out.push(
+      `| ${escCell(r.target)} | ${r.result.status} | ${r.result.iterations} | ${r.result.finalStreak}/${r.result.threshold} |`,
+    )
+  }
+  out.push('', `각 타겟 상세 보고서: \`${DIR}/targets/<slug>/summary.md\``, '')
+  await writeText(paths.summary, out.join('\n'))
+}
+
+export interface DriverResult {
+  readonly status: LoopState['status']
+  readonly iterations: number
+  readonly finalStreak: number
+  readonly threshold: number
+}
+
+/** Run ONE independent loop (whole-repo when target is null, else scoped to the target path). */
+async function runOneLoop(
+  root: string,
+  target: string | null,
+  config: RetryNowConfig,
+  opts: DriverOptions,
+  log: (line: string) => void,
+): Promise<DriverResult> {
+  const slug = target !== null ? slugifyTarget(target) : undefined
+  const stateDirRel = target !== null ? `${DIR}/targets/${slug}` : DIR
+  const scope = target ?? ''
+  const paths = resolvePaths(root, slug)
+  const label = target ?? 'repo'
+
+  await ensureDir(paths.reportsDir)
+  await ensureDir(paths.logsDir)
+  await writePrompts(paths, config, stateDirRel, scope) // (re)generate scoped prompts for this loop
+  if (!(await exists(paths.ledger)))
+    await writeText(paths.ledger, LEDGER_HEADER)
+
+  const state = await loadState(paths, config.threshold, config.revertThreshold)
+
+  if (state.status.startsWith('stopped')) {
+    log(
+      `[${label}] 이미 '${state.status}'. 리셋하려면 ${stateDirRel}/state.json 을 삭제.`,
+    )
+    return {
+      status: state.status,
+      iterations: state.iteration,
+      finalStreak: state.noImprovementStreak,
+      threshold: state.threshold,
+    }
+  }
+
+  while (true) {
+    if (await exists(paths.stop)) {
+      log(`[${label}] STOP 감지(.retry-now/STOP). 정지.`)
+      state.status = 'stopped-manual'
+      break
+    }
+    if (state.noImprovementStreak >= config.threshold) {
+      log(`[${label}] ${converged(config.threshold)}`)
+      state.status = 'stopped-converged'
+      break
+    }
+    if (state.revertStreak >= config.revertThreshold) {
+      log(`[${label}] ${revertConverged(config.revertThreshold)}`)
+      state.status = 'stopped-converged'
+      break
+    }
+    if (state.iteration >= config.maxIterations) {
+      log(
+        `[${label}] MaxIterations(${config.maxIterations}) 도달 → 정지(안전 상한).`,
+      )
+      state.status = 'stopped-maxiter'
+      break
+    }
+
+    const iter = state.iteration + 1
+    log('─'.repeat(56))
+    log(`${rebirth(iter)}${target ? ` · ${target}` : ''}`)
+
+    const a = await runPhaseResilient(
+      paths,
+      config,
+      iter,
+      'analyze',
+      opts,
+      log,
+      stateDirRel,
+      scope,
+    )
+    if (!a) {
+      log(
+        `[${label}][${iter}] analyze: ${PHASE_ATTEMPTS}회 시도 모두 유효한 신호 없음 → error 정지.`,
+      )
+      logCrashGuidance(log, config, paths)
+      state.status = 'error'
+      break
+    }
+    await appendHistory(paths, iter, 'analyze', a)
+
+    if (a.result === 'no_improvements') {
+      recordNoImprovement(state)
+      state.iteration = iter
+      await saveState(paths, state)
+      log(
+        `[${label}][${iter}] analyze: 개선 없음. streak = ${state.noImprovementStreak}/${config.threshold}`,
+      )
+      continue
+    }
+
+    log(
+      `[${label}][${iter}] analyze: 개선 발견 → '${a.nextImprovement}'. streak 리셋.`,
+    )
+
+    const b = await runPhaseResilient(
+      paths,
+      config,
+      iter,
+      'improve',
+      opts,
+      log,
+      stateDirRel,
+      scope,
+    )
+    if (!b) {
+      log(
+        `[${label}][${iter}] improve: ${PHASE_ATTEMPTS}회 시도 모두 유효한 신호 없음 → error 정지.`,
+      )
+      logCrashGuidance(log, config, paths)
+      state.status = 'error'
+      break
+    }
+    await appendHistory(paths, iter, 'improve', b)
+    log(`[${label}][${iter}] improve: ${b.result} (${b.metricDelta ?? 'n/a'})`)
+
+    resetStreak(state)
+    if (b.result === 'applied') {
+      resetRevertStreak(state)
+    } else {
+      recordRevert(state)
+      log(
+        `[${label}][${iter}] 보존된 변경 없음(${b.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
+      )
+    }
+    state.iteration = iter
+    await saveState(paths, state)
+  }
+
+  await saveState(paths, state)
+  await writeSummary(paths, state, config, target ?? undefined)
+  log(
+    `[${label}] 종료: status=${state.status} iters=${state.iteration} streak=${state.noImprovementStreak}/${config.threshold}`,
+  )
+  log(`[${label}] summary: ${paths.summary}`)
+  return {
+    status: state.status,
+    iterations: state.iteration,
+    finalStreak: state.noImprovementStreak,
+    threshold: state.threshold,
+  }
+}
+
+/**
+ * Run the loop(s) to a terminal state. Whole-repo when `config.targets` is empty, else one
+ * independent loop per target. Resolves an aggregate result when everything stops.
+ */
+export async function runLoop(
+  config: RetryNowConfig,
+  opts: DriverOptions,
+): Promise<DriverResult> {
+  const log = opts.log ?? ((line: string) => console.log(line))
+  await scaffold(opts.cwd, config, false) // shared config/gitignore/readme + root prompts
+
+  log(BANNER)
+  log(
+    `agent=${AGENT_LABEL[config.agent]}  stop-after=${config.threshold} no-improve / ${config.revertThreshold} reverts  ` +
+      `max-iters=${config.maxIterations}  commit=${config.commitPerIteration ? 'on' : 'off'}  ` +
+      `bench=${config.benchCommand ? `on×${config.benchRuns}` : 'off'}` +
+      `${config.targets.length > 0 ? `  targets=${config.targets.length}` : ''}${opts.dryRun ? '  [DRY-RUN]' : ''}`,
+  )
+
+  if (config.targets.length === 0) {
+    return runOneLoop(opts.cwd, null, config, opts, log)
+  }
+
+  log(
+    `per-package 윤회(분할): ${config.targets.length}개 타겟 — 각자 독립 수렴`,
+  )
+  const results: { target: string; result: DriverResult }[] = []
+  for (const target of config.targets) {
+    log('═'.repeat(56))
+    log(`◆ TARGET: ${target}`)
+    const result = await runOneLoop(opts.cwd, target, config, opts, log)
+    results.push({ target, result })
+    if (await exists(resolvePaths(opts.cwd).stop)) {
+      log('STOP 감지 — 남은 타겟을 중단합니다.')
+      break
+    }
+  }
+
+  await writeOverallSummary(opts.cwd, config, results)
+
+  const anyError = results.some((r) => r.result.status === 'error')
+  const anyManual = results.some((r) => r.result.status === 'stopped-manual')
+  const allConverged =
+    results.length > 0 &&
+    results.every((r) => r.result.status === 'stopped-converged')
+  const status: LoopState['status'] = anyError
+    ? 'error'
+    : allConverged
+      ? 'stopped-converged'
+      : anyManual
+        ? 'stopped-manual'
+        : 'stopped-maxiter'
+  const iterations = results.reduce((sum, r) => sum + r.result.iterations, 0)
+
+  log('')
+  log(
+    `=== 전체 윤회 종료 === targets=${results.length}  status=${status}  total-iters=${iterations}`,
+  )
+  log(`overall summary: ${resolvePaths(opts.cwd).summary}`)
+  return { status, iterations, finalStreak: 0, threshold: config.threshold }
+}
+
+export interface RunProjectOptions {
+  readonly dryRun?: boolean
+  /** override config.commitPerIteration for this run only */
+  readonly commitOverride?: boolean
+}
+
+/**
+ * Load a project's config and run its loop(s). Returns null when no `.retry-now/config.json`
+ * exists. Shared by every agent frontend's driver entry (opencode / claude / codex) and the CLI.
+ */
+export async function runProjectLoop(
+  cwd: string,
+  opts: RunProjectOptions = {},
+): Promise<DriverResult | null> {
+  const loaded = await loadConfig(cwd)
+  if (!loaded) return null
+  const config =
+    opts.commitOverride === undefined
+      ? loaded
+      : { ...loaded, commitPerIteration: opts.commitOverride }
+  return runLoop(config, { cwd, dryRun: opts.dryRun ?? false })
+}
+
+/**
+ * Shared driver CLI: parse `--cwd <path> --dry-run --commit|--no-commit`, run the project loop,
+ * and resolve a process exit code. Every agent frontend's driver entry is a thin shim over this.
+ */
+export async function runDriverCli(argv: readonly string[]): Promise<number> {
+  const i = argv.indexOf('--cwd')
+  const cwd = i >= 0 ? (argv[i + 1] ?? process.cwd()) : process.cwd()
+  const dryRun = argv.includes('--dry-run')
+  const commitOverride = argv.includes('--no-commit')
+    ? false
+    : argv.includes('--commit')
+      ? true
+      : undefined
+  const result = await runProjectLoop(cwd, {
+    dryRun,
+    ...(commitOverride === undefined ? {} : { commitOverride }),
+  })
+  if (!result) {
+    console.error(
+      '이 프로젝트에 .retry-now/config.json 이 없다. 먼저 `retry-now init` 을 실행하라.',
+    )
+    return 1
+  }
+  return result.status === 'error' ? 1 : 0
+}
+
+export { resolvePaths }
