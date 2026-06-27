@@ -1,13 +1,19 @@
 {
   "name": "@retry-now/opencode",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "opencode plugin: registers /retry-now, which launches the retry-now reincarnation loop driver for the current project.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "source": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun build ./src/index.ts ./src/driver-entry.ts --outdir dist --target node --packages external"
   },
   "dependencies": {
     "@retry-now/core": "workspace:*"
@@ -19,6 +25,7 @@
     "@opencode-ai/plugin": "latest"
   },
   "files": [
+    "dist",
     "src"
   ]
 }

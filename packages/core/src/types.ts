@@ -86,6 +86,14 @@ export interface RetryNowConfig {
    */
   readonly benchRuns: number
   /**
+   * How many independently-revertible improvements a SINGLE 윤회 may plan and apply as one batch.
+   * ANALYZE emits up to this many ranked plan items; IMPROVE applies them with a per-item
+   * backup/verify/keep gate, so ONE fresh full-codebase analysis is amortised over several
+   * changes instead of being discarded after a single pick. Default 3, clamped to 1..8. `1`
+   * reproduces the original one-change-per-iteration behaviour exactly.
+   */
+  readonly improvementBatchSize: number
+  /**
    * Per-package 윤회 targets — paths relative to root (e.g. "crates/vespera_core"). EMPTY = a
    * single loop over the whole repo. Non-empty (monorepo split mode) = one INDEPENDENT loop per
    * target, each converging on its own and scoped to that path. Chosen at init for monorepos.
@@ -111,7 +119,7 @@ export interface LoopState {
   /** consecutive `no_improvements` count — the only thing that survives reincarnation. */
   noImprovementStreak: number
   threshold: number
-  /** consecutive iterations whose improvement was NOT kept (`applied_reverted`/`failed`). */
+  /** consecutive positive-ANALYZE iterations whose IMPROVE batch kept ZERO items. */
   revertStreak: number
   revertThreshold: number
   startedAt: string
@@ -128,10 +136,37 @@ export type ImproveResult =
   | 'failed'
   | 'pending'
 
+/** One ranked item in an ANALYZE phase's batch plan (`## BATCH PLAN`). */
+export interface PlannedImprovement {
+  /** stable within-iteration id used to cross-reference the applied outcome ("1", "2", …) */
+  id: string
+  title: string
+  /** rough risk the analyst assigns the change; informs IMPROVE ordering/grouping */
+  risk?: 'low' | 'medium' | 'high'
+}
+
+/** Outcome of a single batch item after IMPROVE's per-item keep/revert gate. */
+export type BatchItemStatus = 'kept' | 'reverted' | 'failed' | 'skipped'
+
+/** One ANALYZE plan item paired with what IMPROVE actually did with it. */
+export interface AppliedImprovement {
+  id: string
+  title: string
+  status: BatchItemStatus
+  /** measured primary metric delta for this item, when one was measured */
+  metricDelta?: string
+  files?: readonly string[]
+  summary?: string
+}
+
 /**
  * One-way signal: agent → driver. Overwritten every phase. Lives at
  * `.retry-now/signal.json`. The driver resets it to `pending` before each run so a
  * crashed/silent agent is detectable.
+ *
+ * The batch fields are OPTIONAL so the single-change protocol (`nextImprovement` /
+ * `metricDelta`) still round-trips unchanged; the driver derives the kept count from
+ * `appliedImprovements` when present and otherwise falls back to the legacy `result`.
  */
 export interface Signal {
   iteration: number
@@ -139,10 +174,22 @@ export interface Signal {
   result: AnalyzeResult | ImproveResult
   /** path to the human-facing report this phase wrote */
   report: string
-  /** ANALYZE only: short title of the single chosen next improvement */
+  /** ANALYZE only: short title of the FIRST planned improvement (legacy compatibility) */
   nextImprovement?: string
+  /** ANALYZE only: the full ranked batch plan (up to `config.improvementBatchSize` items) */
+  plannedImprovements?: readonly PlannedImprovement[]
   /** IMPROVE only: measured primary metric delta (free text), e.g. "-7.3% p50" */
   metricDelta?: string
+  /** IMPROVE only: per-item outcome for every planned item the phase acted on */
+  appliedImprovements?: readonly AppliedImprovement[]
+  /** IMPROVE only: count of items KEPT this batch (the driver's progress signal) */
+  keptCount?: number
+  /** IMPROVE only: count of items reverted on a regression/check failure */
+  revertedCount?: number
+  /** IMPROVE only: count of items that could not be completed safely */
+  failedCount?: number
+  /** IMPROVE only: count of items skipped (e.g. invalidated by an earlier item) */
+  skippedCount?: number
   summary: string
   timestamp: string
 }

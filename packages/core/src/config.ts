@@ -23,6 +23,10 @@ export const DEFAULT_THRESHOLD = 5
 export const DEFAULT_MAX_ITERATIONS = 50
 export const DEFAULT_REVERT_THRESHOLD = 3
 export const DEFAULT_BENCH_RUNS = 5
+export const DEFAULT_IMPROVEMENT_BATCH_SIZE = 3
+/** Hard bounds on the batch size: 1 (original single-change behaviour) .. 8. */
+export const MIN_IMPROVEMENT_BATCH_SIZE = 1
+export const MAX_IMPROVEMENT_BATCH_SIZE = 8
 
 export const DEFAULTS: RetryNowConfig = {
   version: 1,
@@ -42,6 +46,7 @@ export const DEFAULTS: RetryNowConfig = {
   verifyLint: '',
   benchCommand: '',
   benchRuns: DEFAULT_BENCH_RUNS,
+  improvementBatchSize: DEFAULT_IMPROVEMENT_BATCH_SIZE,
   targets: [],
 }
 
@@ -50,6 +55,10 @@ export class ConfigError extends Error {}
 function int(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(n) ? Math.trunc(n) : fallback
+}
+
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value))
 }
 
 function str(value: unknown, fallback: string): string {
@@ -94,6 +103,14 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
   const benchRuns = int(raw.benchRuns, DEFAULT_BENCH_RUNS)
   if (benchRuns < 1) throw new ConfigError('benchRuns must be >= 1')
 
+  // Clamp (not throw): an out-of-range batch size is a harmless tuning knob, so a stray value
+  // degrades to the nearest legal one rather than failing the whole loop. `1` = original behaviour.
+  const improvementBatchSize = clamp(
+    int(raw.improvementBatchSize, DEFAULT_IMPROVEMENT_BATCH_SIZE),
+    MIN_IMPROVEMENT_BATCH_SIZE,
+    MAX_IMPROVEMENT_BATCH_SIZE,
+  )
+
   return {
     version: 1,
     agent,
@@ -112,6 +129,7 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
     verifyLint: str(raw.verifyLint, '').trim(),
     benchCommand: str(raw.benchCommand, '').trim(),
     benchRuns,
+    improvementBatchSize,
     targets: Array.isArray(raw.targets)
       ? raw.targets
           .filter((t): t is string => typeof t === 'string')

@@ -1,13 +1,14 @@
 {
   "name": "@retry-now/cli",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "retry-now CLI — `retry-now init` (interactive setup UI) + `run` (the reincarnation loop driver). Works with opencode, codex, or claude code.",
   "bin": {
-    "retry-now": "./src/index.ts"
+    "retry-now": "./dist/index.js"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun build ./src/index.ts --outdir dist --target node --packages external"
   },
   "dependencies": {
     "@retry-now/core": "workspace:*",
@@ -15,6 +16,7 @@
     "@clack/prompts": "^0.7.0"
   },
   "files": [
+    "dist",
     "src"
   ]
 }

@@ -11,15 +11,20 @@
  * straight into a run. The bundled driver path + project root are baked at load time, so no
  * global CLI install is required.
  */
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from '@opencode-ai/plugin'
 import { buildFrontendBody } from '@retry-now/core'
 
-/** Absolute path to the bundled driver entry, resolved relative to this module. */
-const DRIVER_ENTRY = fileURLToPath(
-  new URL('./driver-entry.ts', import.meta.url),
-)
+// Absolute path to the driver entry, resolved relative to this module. Prefer the compiled
+// sibling when loaded from dist (published), else the .ts source (dev) — bun runs either.
+const here = dirname(fileURLToPath(import.meta.url))
+const compiledDriver = join(here, 'driver-entry.js')
+const DRIVER_ENTRY = existsSync(compiledDriver)
+  ? compiledDriver
+  : join(here, 'driver-entry.ts')
 
 // The template (interview-then-run body, shared with the install command) is sent to the
 // opencode agent in English (token-efficient); the agent talks back in the user's language.

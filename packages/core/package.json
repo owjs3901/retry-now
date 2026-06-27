@@ -1,16 +1,24 @@
 {
   "name": "@retry-now/core",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "retry-now engine: scaffold, signal/state protocol, prompt synthesis, agent adapters, and the reincarnation loop driver.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "source": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun build ./src/index.ts --outdir dist --target node --packages external && dts-bundle-generator -o dist/index.d.ts src/index.ts --no-check"
   },
   "files": [
+    "dist",
     "src"
   ]
 }

@@ -65,11 +65,15 @@ ${oathBlock()}
 이터레이션을 가로지르는 유일한 상태는 \`state.json\`의 **연속 no-improvement 스트릭**뿐이며,
 이는 드라이버가 소유한다. ANALYZE는 이전 리포트/렉저/히스토리/state를 **읽지 않는다**(편향 금지).
 
+매 ANALYZE는 한 번의 무편향 분석으로 **최대 \`${config.improvementBatchSize}\`개**를 배치로 계획하고,
+IMPROVE가 항목별 백업→적용→체크포인트 검증으로 **각각 보존/되돌림**한다(부분 성공 허용). 한 번의 분석을
+배치 전체에 분산하므로 분석 토큰이 윤회마다 버려지지 않는다. (\`improvementBatchSize = 1\`이면 항목 1개 = 옛 동작.)
+
 윤회는 ANALYZE가 \`${config.threshold}\`생 연속 \`no_improvements\`를 내거나, IMPROVE가
-\`${config.revertThreshold}\`생 연속 **윤회 전체 리버트**(회귀로 되돌림)되면 **맺어졌다(수렴)**고
+\`${config.revertThreshold}\`생 연속 **한 항목도 보존하지 못하면(배치 kept 0)** **맺어졌다(수렴)**고
 판단하고 멈춘다. 안전 상한 \`maxIterations = ${config.maxIterations}\`.
 
-git 커밋: ${config.commitPerIteration ? '**켜짐** — 각 윤회의 KEEP 변경분을 `retry-now#NNNN:` 프리픽스로 커밋(한 윤회 내 다중 커밋 가능). 윤회별로 git에서 변경을 리뷰할 수 있다.' : '**꺼짐** — 변경분은 워킹트리에만 남기고 커밋하지 않는다.'}
+git 커밋: ${config.commitPerIteration ? '**켜짐** — 각 윤회의 KEEP 항목들을 묶어 `retry-now#NNNN:` 프리픽스로 **1커밋**. 항목별 귀속은 report/ledger에 보존되며, 윤회별로 git에서 변경을 리뷰할 수 있다.' : '**꺼짐** — 변경분은 워킹트리에만 남기고 커밋하지 않는다.'}
 
 step1(분석)은 **반드시 비파괴(read-only)** 다. step3(완료 체크): ${verifyDesc}.
 벤치마크: ${benchDesc}. 모든 윤회 종료 시 **종합 보고서 \`summary.md\`** 가 생성된다.

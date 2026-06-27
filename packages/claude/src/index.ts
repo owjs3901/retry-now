@@ -6,11 +6,19 @@
  * into `.claude/commands/retry-now.md` (project) or `~/.claude/commands/retry-now.md` (personal)
  * with this package's driver baked in. Also exported as a programmatic `install()`.
  */
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { type FrontendInstallResult, installFrontend } from '@retry-now/core'
 
-const DRIVER = fileURLToPath(new URL('./driver-entry.ts', import.meta.url))
+// Prefer the compiled sibling when running from dist (published), else the .ts source (dev).
+// bun runs either; the baked command just needs a path that exists in the current layout.
+const here = dirname(fileURLToPath(import.meta.url))
+const compiledDriver = join(here, 'driver-entry.js')
+const DRIVER = existsSync(compiledDriver)
+  ? compiledDriver
+  : join(here, 'driver-entry.ts')
 
 export function install(
   opts: { cwd?: string; personal?: boolean } = {},

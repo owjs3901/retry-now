@@ -30,13 +30,11 @@ import {
 } from './io.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
-import { beginPhase, readSignal } from './signal.ts'
+import { beginPhase, keptCountOf, readSignal } from './signal.ts'
 import {
   loadState,
+  recordImproveOutcome,
   recordNoImprovement,
-  recordRevert,
-  resetRevertStreak,
-  resetStreak,
   saveState,
 } from './state.ts'
 import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
@@ -103,6 +101,9 @@ function synthSignal(iter: number, phase: Phase): Signal {
       result: found ? 'improvements_found' : 'no_improvements',
       report: `(dry-run)`,
       nextImprovement: found ? '(dry-run improvement)' : '',
+      plannedImprovements: found
+        ? [{ id: '1', title: '(dry-run improvement)', risk: 'low' }]
+        : [],
       summary: '(dry-run)',
       timestamp: nowIso(),
     }
@@ -112,6 +113,13 @@ function synthSignal(iter: number, phase: Phase): Signal {
     phase,
     result: 'applied',
     report: '(dry-run)',
+    appliedImprovements: [
+      { id: '1', title: '(dry-run improvement)', status: 'kept' },
+    ],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
     metricDelta: '(dry-run)',
     summary: '(dry-run)',
     timestamp: nowIso(),
@@ -228,6 +236,21 @@ async function appendHistory(
       report: sig.report,
       ...(sig.nextImprovement ? { nextImprovement: sig.nextImprovement } : {}),
       ...(sig.metricDelta ? { metricDelta: sig.metricDelta } : {}),
+      ...(sig.plannedImprovements
+        ? { plannedCount: sig.plannedImprovements.length }
+        : {}),
+      ...(typeof sig.keptCount === 'number'
+        ? { keptCount: sig.keptCount }
+        : {}),
+      ...(typeof sig.revertedCount === 'number'
+        ? { revertedCount: sig.revertedCount }
+        : {}),
+      ...(typeof sig.failedCount === 'number'
+        ? { failedCount: sig.failedCount }
+        : {}),
+      ...(typeof sig.skippedCount === 'number'
+        ? { skippedCount: sig.skippedCount }
+        : {}),
     }),
   )
 }
@@ -241,6 +264,11 @@ interface HistoryEntry {
   report?: string
   nextImprovement?: string
   metricDelta?: string
+  plannedCount?: number
+  keptCount?: number
+  revertedCount?: number
+  failedCount?: number
+  skippedCount?: number
 }
 
 function escCell(s: string): string {
@@ -302,8 +330,12 @@ async function writeSummary(
   if (applied.length > 0) {
     out.push('## 적용된 개선 (KEEP)')
     for (const e of applied) {
+      const counts =
+        typeof e.keptCount === 'number'
+          ? ` (kept ${e.keptCount}${e.revertedCount ? `, reverted ${e.revertedCount}` : ''})`
+          : ''
       out.push(
-        `- [${pad(e.iteration)}] ${escCell(e.summary ?? '')}${e.metricDelta ? ` — \`${escCell(e.metricDelta)}\`` : ''}`,
+        `- [${pad(e.iteration)}] ${escCell(e.summary ?? '')}${counts}${e.metricDelta ? ` — \`${escCell(e.metricDelta)}\`` : ''}`,
       )
     }
     out.push('')
@@ -460,8 +492,9 @@ async function runOneLoop(
       continue
     }
 
+    const plannedCount = a.plannedImprovements?.length ?? 1
     log(
-      `[${label}][${iter}] analyze: 개선 발견 → '${a.nextImprovement}'. streak 리셋.`,
+      `[${label}][${iter}] analyze: 개선 발견 (${plannedCount}개 계획) → '${a.nextImprovement}'. streak 리셋.`,
     )
 
     const b = await runPhaseResilient(
@@ -483,13 +516,13 @@ async function runOneLoop(
       break
     }
     await appendHistory(paths, iter, 'improve', b)
-    log(`[${label}][${iter}] improve: ${b.result} (${b.metricDelta ?? 'n/a'})`)
+    const kept = keptCountOf(b)
+    log(
+      `[${label}][${iter}] improve: ${b.result} — kept ${kept} (${b.metricDelta ?? 'n/a'})`,
+    )
 
-    resetStreak(state)
-    if (b.result === 'applied') {
-      resetRevertStreak(state)
-    } else {
-      recordRevert(state)
+    recordImproveOutcome(state, kept)
+    if (kept === 0) {
       log(
         `[${label}][${iter}] 보존된 변경 없음(${b.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
       )

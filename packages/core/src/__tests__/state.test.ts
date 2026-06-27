@@ -15,6 +15,7 @@ import { writeJson } from '../io.ts'
 import { resolvePaths } from '../paths.ts'
 import {
   loadState,
+  recordImproveOutcome,
   recordNoImprovement,
   recordRevert,
   resetRevertStreak,
@@ -142,5 +143,41 @@ test('a kept improvement resets the revert streak so progress restarts the count
   expect(s.revertStreak).toBe(0)
   // a later revert then starts climbing again from zero
   expect(recordRevert(s)).toBe(false)
+  expect(s.revertStreak).toBe(1)
+})
+
+test('recordImproveOutcome: a batch that kept >=1 item resets BOTH streaks and does not converge', () => {
+  const s = freshState({ noImprovementStreak: 4, revertStreak: 2 })
+  expect(recordImproveOutcome(s, 3)).toBe(false)
+  expect(s.noImprovementStreak).toBe(0) // analyze found improvements this life
+  expect(s.revertStreak).toBe(0) // kept >=1 -> real progress
+})
+
+test('recordImproveOutcome: a batch that kept 0 items clears no-improve but climbs the revert streak', () => {
+  const s = freshState({
+    noImprovementStreak: 4,
+    revertStreak: 0,
+    revertThreshold: 3,
+  })
+  expect(recordImproveOutcome(s, 0)).toBe(false) // 1/3
+  expect(s.noImprovementStreak).toBe(0)
+  expect(s.revertStreak).toBe(1)
+})
+
+test('recordImproveOutcome: revertThreshold consecutive zero-kept batches converge', () => {
+  const s = freshState({ revertThreshold: 3 })
+  expect(recordImproveOutcome(s, 0)).toBe(false) // 1
+  expect(recordImproveOutcome(s, 0)).toBe(false) // 2
+  expect(recordImproveOutcome(s, 0)).toBe(true) // 3 -> revert-converged
+  expect(s.revertStreak).toBe(3)
+})
+
+test('recordImproveOutcome: a kept batch in between resets the revert climb to zero', () => {
+  const s = freshState({ revertThreshold: 3 })
+  expect(recordImproveOutcome(s, 0)).toBe(false) // 1
+  expect(recordImproveOutcome(s, 0)).toBe(false) // 2
+  expect(recordImproveOutcome(s, 2)).toBe(false) // kept -> reset
+  expect(s.revertStreak).toBe(0)
+  expect(recordImproveOutcome(s, 0)).toBe(false) // climbs again from 1, not 3
   expect(s.revertStreak).toBe(1)
 })

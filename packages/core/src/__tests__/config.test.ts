@@ -16,9 +16,12 @@ import { expect, test } from 'bun:test'
 import {
   ConfigError,
   DEFAULT_BENCH_RUNS,
+  DEFAULT_IMPROVEMENT_BATCH_SIZE,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
+  MAX_IMPROVEMENT_BATCH_SIZE,
+  MIN_IMPROVEMENT_BATCH_SIZE,
   normalizeConfig,
 } from '../config.ts'
 import type { RetryNowConfig } from '../types.ts'
@@ -52,6 +55,7 @@ function validRaw(): Partial<RetryNowConfig> {
     verifyLint: 'bun run lint',
     benchCommand: 'bun run bench',
     benchRuns: 9,
+    improvementBatchSize: 5,
     targets: ['packages/core', 'packages/cli'],
   }
 }
@@ -77,6 +81,7 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
     verifyLint: 'bun run lint',
     benchCommand: 'bun run bench',
     benchRuns: 9,
+    improvementBatchSize: 5,
     targets: ['packages/core', 'packages/cli'],
   })
 })
@@ -171,6 +176,56 @@ test('int helper still falls back for non-numeric thresholds (sanity)', () => {
   expect(out.revertThreshold).toBe(DEFAULT_REVERT_THRESHOLD)
   expect(out.maxIterations).toBe(DEFAULT_MAX_ITERATIONS)
   expect(out.benchRuns).toBe(DEFAULT_BENCH_RUNS)
+})
+
+test('improvementBatchSize: non-numeric falls back to the default and stays in range', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      improvementBatchSize: 'lots',
+    }),
+  )
+  expect(out.improvementBatchSize).toBe(DEFAULT_IMPROVEMENT_BATCH_SIZE)
+})
+
+test('improvementBatchSize: out-of-range values are clamped to 1..8 (not rejected)', () => {
+  const tooBig = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      improvementBatchSize: 99,
+    }),
+  )
+  expect(tooBig.improvementBatchSize).toBe(MAX_IMPROVEMENT_BATCH_SIZE)
+
+  const tooSmall = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      improvementBatchSize: 0,
+    }),
+  )
+  expect(tooSmall.improvementBatchSize).toBe(MIN_IMPROVEMENT_BATCH_SIZE)
+})
+
+test('improvementBatchSize: a legal value (1 = classic single-change) round-trips unchanged', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      improvementBatchSize: 1,
+    }),
+  )
+  expect(out.improvementBatchSize).toBe(1)
 })
 
 test('targets filter still drops non-strings and normalises trailing slashes / backslashes (sanity)', () => {

@@ -1,21 +1,28 @@
 {
   "name": "@retry-now/claude",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "retry-now integration for Claude Code — installs a /retry-now slash command that launches the reincarnation loop.",
   "bin": {
-    "retry-now-claude": "./src/index.ts"
+    "retry-now-claude": "./dist/index.js"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "source": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun build ./src/index.ts ./src/driver-entry.ts --outdir dist --target node --packages external"
   },
   "dependencies": {
     "@retry-now/core": "workspace:*"
   },
   "files": [
+    "dist",
     "src"
   ]
 }

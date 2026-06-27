@@ -59,16 +59,40 @@ export function resetStreak(state: LoopState): void {
 }
 
 /**
- * IMPROVE did not keep a change (`applied_reverted`/`failed`): bump the revert streak. Returns
- * whether we have now revert-converged — the same kind of change kept getting proposed and
- * reverted, which means there is effectively nothing left worth keeping.
+ * IMPROVE's batch KEPT zero items (every planned item was reverted/failed): bump the revert
+ * streak. Returns whether we have now revert-converged — a fresh ANALYZE keeps proposing changes
+ * that IMPROVE keeps rolling back, which means there is effectively nothing left worth keeping.
+ * (With a batch size of 1 this is exactly the original `applied_reverted`/`failed` case.)
  */
 export function recordRevert(state: LoopState): boolean {
   state.revertStreak += 1
   return state.revertStreak >= state.revertThreshold
 }
 
-/** IMPROVE KEPT a change (`applied`): real progress, so the consecutive-revert streak resets. */
+/**
+ * IMPROVE's batch KEPT at least one item: real progress, so the consecutive-revert streak resets.
+ */
 export function resetRevertStreak(state: LoopState): void {
   state.revertStreak = 0
+}
+
+/**
+ * Fold one completed IMPROVE batch into BOTH cross-life streaks in one place.
+ *
+ * Reaching this point means ANALYZE found improvements this life, so the no-improvement streak
+ * always resets. The revert streak then resets when the batch kept at least one item (real
+ * progress), or climbs — possibly to convergence — when it kept nothing. Returns whether the
+ * revert streak has now revert-converged. With `improvementBatchSize = 1` this is exactly the old
+ * `applied` (kept 1) vs `applied_reverted`/`failed` (kept 0) split.
+ */
+export function recordImproveOutcome(
+  state: LoopState,
+  keptCount: number,
+): boolean {
+  resetStreak(state)
+  if (keptCount > 0) {
+    resetRevertStreak(state)
+    return false
+  }
+  return recordRevert(state)
 }
