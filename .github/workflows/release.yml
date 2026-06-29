@@ -34,7 +34,7 @@ jobs:
     name: typecheck / lint / test / build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -61,7 +61,7 @@ jobs:
     needs: quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # changepacks detects changes from git history — needs the full tree.
           fetch-depth: 0

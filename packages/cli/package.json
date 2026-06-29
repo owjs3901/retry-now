@@ -23,7 +23,7 @@
   "dependencies": {
     "@retry-now/core": "workspace:*",
     "@retry-now/detect": "workspace:*",
-    "@clack/prompts": "^0.7.0"
+    "@clack/prompts": "^1.6.0"
   },
   "files": [
     "dist",
