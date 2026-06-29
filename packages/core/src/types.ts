@@ -131,10 +131,7 @@ export type AnalyzeResult = 'improvements_found' | 'no_improvements' | 'pending'
 
 /** Result codes an IMPROVE phase may emit. */
 export type ImproveResult =
-  | 'applied'
-  | 'applied_reverted'
-  | 'failed'
-  | 'pending'
+  'applied' | 'applied_reverted' | 'failed' | 'pending'
 
 /** One ranked item in an ANALYZE phase's batch plan (`## BATCH PLAN`). */
 export interface PlannedImprovement {
