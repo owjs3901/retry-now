@@ -14,7 +14,7 @@
     },
     "packages/claude": {
       "name": "@retry-now/claude",
-      "version": "0.2.0",
+      "version": "0.1.0",
       "bin": {
         "retry-now-claude": "./src/index.ts",
       },
@@ -24,7 +24,7 @@
     },
     "packages/cli": {
       "name": "@retry-now/cli",
-      "version": "0.2.0",
+      "version": "0.1.0",
       "bin": {
         "retry-now": "./src/index.ts",
       },
@@ -36,7 +36,7 @@
     },
     "packages/codex": {
       "name": "@retry-now/codex",
-      "version": "0.2.0",
+      "version": "0.1.0",
       "bin": {
         "retry-now-codex": "./src/index.ts",
       },
@@ -46,15 +46,15 @@
     },
     "packages/core": {
       "name": "@retry-now/core",
-      "version": "0.2.0",
+      "version": "0.1.0",
     },
     "packages/detect": {
       "name": "@retry-now/detect",
-      "version": "0.2.0",
+      "version": "0.1.0",
     },
     "packages/opencode": {
       "name": "@retry-now/opencode",
-      "version": "0.2.0",
+      "version": "0.1.0",
       "dependencies": {
         "@retry-now/core": "workspace:*",
       },

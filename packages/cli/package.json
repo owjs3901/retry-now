@@ -2,6 +2,16 @@
   "name": "@retry-now/cli",
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
+  "author": "owjs3901",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owjs3901/retry-now.git",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "retry-now CLI — `retry-now init` (interactive setup UI) + `run` (the reincarnation loop driver). Works with opencode, codex, or claude code.",
   "bin": {
     "retry-now": "./dist/index.js"

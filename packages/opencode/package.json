@@ -2,6 +2,16 @@
   "name": "@retry-now/opencode",
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
+  "author": "owjs3901",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owjs3901/retry-now.git",
+    "directory": "packages/opencode"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "opencode plugin: registers /retry-now, which launches the retry-now reincarnation loop driver for the current project.",
   "exports": {
     ".": {

@@ -2,6 +2,16 @@
   "name": "@retry-now/claude",
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
+  "author": "owjs3901",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owjs3901/retry-now.git",
+    "directory": "packages/claude"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "retry-now integration for Claude Code — installs a /retry-now slash command that launches the reincarnation loop.",
   "bin": {
     "retry-now-claude": "./dist/index.js"
