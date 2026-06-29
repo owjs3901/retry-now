@@ -5,30 +5,30 @@
  * `detectCapabilities`, asserts the resolved commands, and cleans up. No real test/lint
  * binary is ever executed — the detector is pure file-system inspection.
  */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import * as fsp from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 
 import { detectCapabilities } from '../index.ts'
 
 let dir: string
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'retry-now-detect-'))
+  dir = await fsp.mkdtemp(join(tmpdir(), 'retry-now-detect-'))
 })
 
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true })
+  await fsp.rm(dir, { recursive: true, force: true })
 })
 
 async function write(rel: string, content = ''): Promise<void> {
-  await writeFile(join(dir, rel), content, 'utf8')
+  await fsp.writeFile(join(dir, rel), content, 'utf8')
 }
 
 async function mkdirIn(rel: string): Promise<void> {
-  await mkdir(join(dir, rel), { recursive: true })
+  await fsp.mkdir(join(dir, rel), { recursive: true })
 }
 
 // ─── empty ─────────────────────────────────────────────────────────────────────
@@ -238,4 +238,130 @@ test('empty dir: isMonorepo false, members empty', async () => {
   const r = await detectCapabilities(dir)
   expect(r.isMonorepo).toBe(false)
   expect(r.members).toEqual([])
+})
+
+// ─── python: lint / bench branches ───────────────────────────────────────────────
+
+test('python: ruff.toml + pyproject ruff resolves lint=ruff check .', async () => {
+  await write('ruff.toml', '')
+  await write('pyproject.toml', '[tool.ruff]\n') // python marker + contains "ruff"
+  const r = await detectCapabilities(dir)
+  expect(r.primary).toBe('python')
+  expect(r.lint).toBe('ruff check .')
+})
+
+test('python: .flake8 + setup.cfg flake8 (no ruff) resolves lint=flake8', async () => {
+  await write('setup.cfg', '[flake8]\n') // python marker + mentions flake8
+  await write('.flake8', '')
+  const r = await detectCapabilities(dir)
+  expect(r.primary).toBe('python')
+  expect(r.lint).toBe('flake8')
+})
+
+test('python: pytest-benchmark in pyproject resolves bench=pytest --benchmark-only', async () => {
+  await write('pyproject.toml', 'pytest-benchmark\n')
+  const r = await detectCapabilities(dir)
+  expect(r.primary).toBe('python')
+  expect(r.bench).toBe('pytest --benchmark-only')
+})
+
+// ─── node: package-manager prefixes (pnpm / yarn) ────────────────────────────────
+
+test('node + pnpm-lock.yaml uses the pnpm run prefix', async () => {
+  await write('package.json', '{}')
+  await write('pnpm-lock.yaml', '')
+  const r = await detectCapabilities(dir)
+  expect(r.primary).toBe('node')
+  expect(r.notes.some((n) => n.includes('package manager=`pnpm`'))).toBe(true)
+})
+
+test('node + yarn.lock uses the bare yarn prefix', async () => {
+  await write('package.json', '{}')
+  await write('yarn.lock', '')
+  const r = await detectCapabilities(dir)
+  expect(r.notes.some((n) => n.includes('package manager=`yarn`'))).toBe(true)
+})
+
+// ─── node: test / lint resolved by dependency ────────────────────────────────────
+
+test('node: a vitest dependency (no test script) resolves test=vitest run', async () => {
+  await write(
+    'package.json',
+    JSON.stringify({ devDependencies: { vitest: '^1' } }),
+  )
+  const r = await detectCapabilities(dir)
+  expect(r.test).toBe('vitest run')
+})
+
+test('node: a jest dependency (no vitest, no test script) resolves test=jest', async () => {
+  await write('package.json', JSON.stringify({ dependencies: { jest: '^29' } }))
+  const r = await detectCapabilities(dir)
+  expect(r.test).toBe('jest')
+})
+
+test('node: eslint file + dep (no oxlint/biome) resolves lint=eslint .', async () => {
+  await write('.eslintrc.json', '{}')
+  await write(
+    'package.json',
+    JSON.stringify({ devDependencies: { eslint: '^9' } }),
+  )
+  const r = await detectCapabilities(dir)
+  expect(r.lint).toBe('eslint .')
+})
+
+// ─── workspace member edge cases ─────────────────────────────────────────────────
+
+test('node workspace: a member without a name falls back to its directory basename', async () => {
+  await write('package.json', JSON.stringify({ workspaces: ['pkgs/*'] }))
+  await mkdirIn('pkgs/alpha')
+  await write('pkgs/alpha/package.json', '{}') // no "name" → baseName
+  const r = await detectCapabilities(dir)
+  expect(r.members).toEqual([{ name: 'alpha', path: 'pkgs/alpha' }])
+})
+
+test('node workspace: the { packages: [...] } object form is honored', async () => {
+  await write(
+    'package.json',
+    JSON.stringify({ workspaces: { packages: ['libs/*'] } }),
+  )
+  await mkdirIn('libs/one')
+  await write('libs/one/package.json', JSON.stringify({ name: '@x/one' }))
+  const r = await detectCapabilities(dir)
+  expect(r.members).toEqual([{ name: '@x/one', path: 'libs/one' }])
+})
+
+test('node workspace: a missing prefix dir (ghost/*) yields no members', async () => {
+  await write('package.json', JSON.stringify({ workspaces: ['ghost/*'] }))
+  const r = await detectCapabilities(dir)
+  expect(r.isMonorepo).toBe(false)
+  expect(r.members).toEqual([])
+})
+
+// ─── never-throw contract: a readdir failure inside listRoot degrades to empty ───
+
+test('detection survives a readdir failure (listRoot catch → treated as empty)', async () => {
+  await write('package.json', '{}')
+  const spy = spyOn(fsp, 'readdir').mockImplementation(() => {
+    throw new Error('EACCES')
+  })
+  try {
+    const r = await detectCapabilities(dir)
+    expect(r.primary).toBe('node') // stat-based detection still works
+  } finally {
+    spy.mockRestore()
+  }
+})
+
+test('rust workspace: an exclude list drops matching members', async () => {
+  await write(
+    'Cargo.toml',
+    '[workspace]\nmembers = ["crates/*"]\nexclude = ["crates/skip/"]\n',
+  )
+  await mkdirIn('crates/keep')
+  await write('crates/keep/Cargo.toml', '[package]\nname = "keep"\n')
+  await mkdirIn('crates/skip')
+  await write('crates/skip/Cargo.toml', '[package]\nname = "skip"\n')
+  const r = await detectCapabilities(dir)
+  // crates/skip is excluded (note the trailing-slash normalisation), only keep remains.
+  expect(r.members).toEqual([{ name: 'keep', path: 'crates/keep' }])
 })

@@ -17,3 +17,4 @@ Thumbs.db
 # but its transient runtime is ignored
 .loop
 .omo
+coverage

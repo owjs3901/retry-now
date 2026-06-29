@@ -130,3 +130,29 @@ test('the new guidance is analyze-only — the IMPROVE prompt is not touched', (
     'Do NOT trade correctness, completeness, or generality for a micro-gain',
   )
 })
+
+test('a non-empty scope injects the per-package scope block into both prompts', () => {
+  const analyze = buildAnalyzePrompt(cfg(), '.retry-now', 'packages/core')
+  const improve = buildImprovePrompt(cfg(), '.retry-now', 'packages/core')
+  expect(analyze).toContain('## 0b. Scope (per-package')
+  expect(analyze).toContain('packages/core')
+  expect(improve).toContain('## 0b. Scope (per-package')
+  // whole-repo (empty scope) renders no scope block
+  expect(buildAnalyzePrompt(cfg())).not.toContain('## 0b. Scope (per-package')
+})
+
+test('improve prompt renders the opposite branches: commits OFF, benchmark present, no verify', () => {
+  const out = buildImprovePrompt(
+    cfg({
+      commitPerIteration: false,
+      benchCommand: 'cargo bench',
+      benchRuns: 7,
+      verifyEnabled: false,
+      verifyTest: '',
+      verifyLint: '',
+    }),
+  )
+  expect(out).toContain('Git commits — DISABLED')
+  expect(out).toContain('This project HAS a benchmark')
+  expect(out).toContain('no automated test/lint configured')
+})

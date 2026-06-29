@@ -7,10 +7,21 @@
  * a legacy single-change signal that carries neither — maps `result === 'applied'` → 1. That
  * fallback is what keeps `improvementBatchSize = 1` behaving exactly like the original protocol.
  */
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test } from 'bun:test'
 
-import { keptCountOf, normalizeSignal } from '../signal.ts'
-import type { Signal } from '../types.ts'
+import { readJson, writeJson } from '../io.ts'
+import { resolvePaths } from '../paths.ts'
+import {
+  beginPhase,
+  keptCountOf,
+  normalizeSignal,
+  readSignal,
+} from '../signal.ts'
+import type { Current, Signal } from '../types.ts'
 
 function improveSignal(overrides: Partial<Signal>): Signal {
   return {
@@ -171,4 +182,67 @@ test('normalizeSignal coerces missing report/summary/timestamp to empty strings'
   expect(sig?.report).toBe('')
   expect(sig?.summary).toBe('')
   expect(sig?.timestamp).toBe('')
+})
+
+// --- beginPhase / readSignal: the on-disk signal channel (driver ↔ agent) ---
+
+test('beginPhase writes a pending signal + a current.json hint carrying the target', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-signal-'))
+  try {
+    const paths = resolvePaths(dir)
+    await beginPhase(paths, 12, 'analyze', 'packages/core')
+    expect(await readJson<Current>(paths.current)).toEqual({
+      iteration: 12,
+      padded: '0012',
+      phase: 'analyze',
+      target: 'packages/core',
+    })
+    const sig = await readJson<Signal>(paths.signal)
+    expect(sig?.result).toBe('pending')
+    expect(sig?.iteration).toBe(12)
+    expect(sig?.phase).toBe('analyze')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('beginPhase omits the target field for a whole-repo (no-target) life', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-signal-'))
+  try {
+    const paths = resolvePaths(dir)
+    await beginPhase(paths, 3, 'improve')
+    const current = await readJson<Current>(paths.current)
+    expect(current).toEqual({ iteration: 3, padded: '0003', phase: 'improve' })
+    expect('target' in (current ?? {})).toBe(false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('readSignal: pending → null, exact match → signal, wrong iteration/phase → null', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-signal-'))
+  try {
+    const paths = resolvePaths(dir)
+    // beginPhase leaves a pending signal → readSignal must reject it.
+    await beginPhase(paths, 5, 'analyze')
+    expect(await readSignal(paths, 5, 'analyze')).toBeNull()
+
+    // a valid, matching analyze signal → returned.
+    await writeJson(paths.signal, {
+      iteration: 5,
+      phase: 'analyze',
+      result: 'improvements_found',
+      report: 'r',
+      summary: 's',
+      timestamp: 't',
+    })
+    expect((await readSignal(paths, 5, 'analyze'))?.result).toBe(
+      'improvements_found',
+    )
+    // right content, wrong iteration or phase → null.
+    expect(await readSignal(paths, 6, 'analyze')).toBeNull()
+    expect(await readSignal(paths, 5, 'improve')).toBeNull()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

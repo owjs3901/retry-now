@@ -5,7 +5,8 @@
  * `RetryNowConfig`. Keep this the single choke point so the driver never sees a half-formed
  * config (e.g. threshold = 0, which would "converge" instantly).
  */
-import { readJson } from './io.ts'
+import { readFile } from 'node:fs/promises'
+
 import { resolvePaths } from './paths.ts'
 import type { AgentKind, RetryNowConfig } from './types.ts'
 
@@ -50,7 +51,12 @@ export const DEFAULTS: RetryNowConfig = {
   targets: [],
 }
 
-export class ConfigError extends Error {}
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConfigError'
+  }
+}
 
 function int(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : Number(value)
@@ -142,7 +148,17 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
 /** Load + validate the on-disk config for a project. Returns null if none exists. */
 export async function loadConfig(root: string): Promise<RetryNowConfig | null> {
   const paths = resolvePaths(root)
-  const raw = await readJson<Partial<RetryNowConfig>>(paths.config)
-  if (!raw) return null
+  let text: string
+  try {
+    text = await readFile(paths.config, 'utf8')
+  } catch {
+    return null // no config file on disk
+  }
+  let raw: Partial<RetryNowConfig>
+  try {
+    raw = JSON.parse(text) as Partial<RetryNowConfig>
+  } catch {
+    return null // present but unparseable
+  }
   return normalizeConfig(raw)
 }

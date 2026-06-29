@@ -11,6 +11,10 @@
  *   2. malformed input → falls back to the documented default (no `TypeError`, no
  *      runtime type lie typed as `RetryNowConfig`).
  */
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test } from 'bun:test'
 
 import {
@@ -20,10 +24,13 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
+  loadConfig,
   MAX_IMPROVEMENT_BATCH_SIZE,
   MIN_IMPROVEMENT_BATCH_SIZE,
   normalizeConfig,
 } from '../config.ts'
+import { writeJson, writeText } from '../io.ts'
+import { resolvePaths } from '../paths.ts'
 import type { RetryNowConfig } from '../types.ts'
 
 /**
@@ -246,4 +253,48 @@ test('targets filter still drops non-strings and normalises trailing slashes / b
     }),
   )
   expect(out.targets).toEqual(['packages/core', 'packages/cli', 'packages/x'])
+})
+
+test('an unknown agent is rejected with a ConfigError naming the allowed kinds', () => {
+  const raw = bad({
+    agent: 'gemini',
+    analysis: 'a',
+    direction: 'b',
+    completion: 'c',
+  })
+  expect(() => normalizeConfig(raw)).toThrow(ConfigError)
+  expect(() => normalizeConfig(raw)).toThrow('agent must be one of')
+})
+
+test('loadConfig returns null when no .retry-now/config.json exists', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-config-'))
+  try {
+    expect(await loadConfig(dir)).toBeNull()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('loadConfig reads and normalizes an on-disk config.json', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-config-'))
+  try {
+    await writeJson(resolvePaths(dir).config, validRaw())
+    const cfg = await loadConfig(dir)
+    expect(cfg?.agent).toBe('opencode')
+    expect(cfg?.analysis).toBe('analyse it')
+    expect(cfg?.threshold).toBe(7)
+    expect(cfg?.improvementBatchSize).toBe(5)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('loadConfig returns null for a present but malformed config.json', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-config-'))
+  try {
+    await writeText(resolvePaths(dir).config, '{ not valid json')
+    expect(await loadConfig(dir)).toBeNull()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
