@@ -123,11 +123,23 @@ Correctness and the priorities below still outrank pure cleanup, but a tree free
 dead code is part of what "nothing left to improve" means.
 
 Rules:
+- Read ALL in-scope source EXHAUSTIVELY. The findings worth shipping are micro-level, so they only
+  surface once you have read everything — do NOT sample, skip, or shortcut files. Full coverage is
+  required and must NOT be reduced; it is exactly why this phase exists.
 - Ground EVERY finding in code you actually read — cite \`file:line\`.
 - A finding must be concrete and actionable: exactly what to change, where, and why it helps.
+- Do NOT trade correctness, completeness, or generality for a micro-gain. A change that wins a few
+  bytes or nanoseconds but stops handling inputs the current code handles is a REGRESSION, not an
+  improvement — e.g. a smaller special-case JSON parser that no longer accepts every valid JSON the
+  full parser does. When a "smaller/faster" rewrite risks many uncovered edge cases, keep the
+  complete, spec-correct implementation and do NOT propose the trade.
 - This phase is STRICTLY NON-DESTRUCTIVE. You may READ anything and run read-only observation
   commands, but you MUST NOT modify, create, delete, move, or reformat any source file, and you
   MUST NOT \`git commit\`. The only file you write is your report + the signal. Analysis only.
+- Do NOT run build/test/lint/clippy (or any compile / typecheck / format check) "to confirm
+  findings". This phase is READ-ONLY: reading the source is enough to ground a finding, and proving
+  it is the IMPROVE phase's job. That redundant verification is the #1 budget-killer — it ends the
+  turn before you reach §5, leaving the signal unwritten.
 
 ---
 
@@ -145,6 +157,16 @@ BE HONEST. If, looking with fresh eyes, the completion criterion above is met an
 concrete change genuinely worth doing, emit \`no_improvements\`. The loop terminates after
 ${config.threshold} consecutive \`no_improvements\` runs — that honest signal is exactly how it
 is meant to converge. Do NOT invent low-value busywork just to avoid saying "no".
+
+But "small" is NOT "worthless", and a real win does NOT need a runtime/memory number. A change that
+saves a few bytes, nanoseconds, or one allocation — AND a pure CODE-QUALITY gain with no measurable
+runtime effect at all (clearer, simpler, less duplicated, less dead code) — are BOTH genuine
+improvements that MUST be captured. Code quality is itself a valid payoff, so PROCEED even when the
+speed/memory delta is exactly zero. Never drop a finding because its payoff is tiny or unmeasurable.
+Small impact is not zero impact, so improve EVERY fine-grained thing you can and let none slip. The
+only busywork to avoid is a change that leaves the code NO better at all — cosmetic churn that does
+not improve clarity, or speculative abstraction that adds indirection without removing real
+duplication; reserve \`no_improvements\` for a tree where no real win of ANY size remains.
 
 ---
 
@@ -173,6 +195,14 @@ attributable even though they ship together.
 ---
 
 ## 5. Emit the signal (MANDATORY — your LAST action)
+
+Writing the report (§4) + this signal is your SINGLE NON-NEGOTIABLE terminal obligation. The MOMENT
+you finish reading the in-scope source, write them IMMEDIATELY — before ANY optional or "nice to
+have" step, and never run a verification command first. LAST RESORT: if your turn or context budget
+is about to run out, STOP everything else and emit this signal NOW with the findings you already
+have. A partial-but-valid \`improvements_found\` signal is always better than none — and you must
+NEVER record a budget-truncated run as \`no_improvements\` (that would falsely converge the loop);
+\`no_improvements\` is honest ONLY after the full fresh read of §1–§3.
 
 Overwrite \`${stateDir}/signal.json\` with EXACTLY this shape (valid JSON, no comments):
 
