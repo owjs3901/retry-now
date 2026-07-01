@@ -24,10 +24,10 @@ export const DEFAULT_THRESHOLD = 5
 export const DEFAULT_MAX_ITERATIONS = 50
 export const DEFAULT_REVERT_THRESHOLD = 3
 export const DEFAULT_BENCH_RUNS = 5
-export const DEFAULT_IMPROVEMENT_BATCH_SIZE = 3
-/** Hard bounds on the batch size: 1 (original single-change behaviour) .. 8. */
+export const DEFAULT_IMPROVEMENT_BATCH_SIZE = 8
+/** Hard bounds on the batch size: 1 (original single-change behaviour) .. 16. */
 export const MIN_IMPROVEMENT_BATCH_SIZE = 1
-export const MAX_IMPROVEMENT_BATCH_SIZE = 8
+export const MAX_IMPROVEMENT_BATCH_SIZE = 16
 /** `waitForQuota` poll interval default: 15 min between quota re-checks. */
 export const DEFAULT_QUOTA_POLL_MS = 15 * 60 * 1000
 /** `waitForQuota` total-wait cap default: 6 h, then stop with `paused-quota`. */

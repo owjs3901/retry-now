@@ -201,7 +201,7 @@ retry-now install codex      # その後 Codex 内で  $retry-now
 | `threshold` | 収束までの連続 `no_improvements` 生数 | `5` |
 | `revertThreshold` | 収束までの保持 0 が連続した生数 | `3` |
 | `maxIterations` | 総生数のハード安全上限 | `50` |
-| `improvementBatchSize` | 1 生あたりの計画項目の上限（`1`..`8`; `1` = 旧来の単一変更） | `3` |
+| `improvementBatchSize` | 1 生あたりの計画項目の上限（`1`..`16`; `1` = 旧来の単一変更） | `8` |
 | `skipPermissions` | 無人実行: エージェントの権限確認をスキップ | `true` |
 | `commitPerIteration` | 各生の保持変更を git コミット（`retry-now#NNNN:` プレフィックス） | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | IMPROVE 後に test/lint を実行し、失敗時に巻き戻し | `false` / `""` |

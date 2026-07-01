@@ -271,7 +271,7 @@ test('improvementBatchSize: non-numeric falls back to the default and stays in r
   expect(out.improvementBatchSize).toBe(DEFAULT_IMPROVEMENT_BATCH_SIZE)
 })
 
-test('improvementBatchSize: out-of-range values are clamped to 1..8 (not rejected)', () => {
+test('improvementBatchSize: out-of-range values are clamped to 1..16 (not rejected)', () => {
   const tooBig = normalizeConfig(
     bad({
       agent: 'opencode',

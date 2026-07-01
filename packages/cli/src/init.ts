@@ -61,8 +61,9 @@ export async function runInit(cwd: string): Promise<number> {
   if (cancelled(agent)) return cancel()
 
   const model = (await p.text({
-    message: '모델 id (provider/model). 비워두면 에이전트 기본값.',
-    placeholder: 'anthropic/claude-sonnet-4-5',
+    message:
+      '모델 id (provider/model). 비워두면 에이전트 기본값 — 새 모델이 계속 나오니 최신 모델 중심으로 직접 지정.',
+    placeholder: 'provider/model',
     defaultValue: '',
   })) as string | symbol
   if (cancelled(model)) return cancel()

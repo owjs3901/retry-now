@@ -199,7 +199,7 @@ retry-now install codex      # 이후 Codex 안에서  $retry-now
 | `threshold` | 수렴까지 연속 `no_improvements` 생 수 | `5` |
 | `revertThreshold` | 수렴까지 보존 0이 연속된 생 수 | `3` |
 | `maxIterations` | 총 생 수 하드 안전 상한 | `50` |
-| `improvementBatchSize` | 한 생당 계획 항목 최대치 (`1`..`8`; `1` = 옛 단일 변경) | `3` |
+| `improvementBatchSize` | 한 생당 계획 항목 최대치 (`1`..`16`; `1` = 옛 단일 변경) | `8` |
 | `skipPermissions` | 무인 실행: 에이전트 권한 확인 건너뜀 | `true` |
 | `commitPerIteration` | 매 생의 보존 변경을 git 커밋 (`retry-now#NNNN:` 프리픽스) | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | IMPROVE 후 test/lint 실행, 실패 시 되돌림 | `false` / `""` |

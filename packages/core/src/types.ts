@@ -89,7 +89,7 @@ export interface RetryNowConfig {
    * How many independently-revertible improvements a SINGLE 윤회 may plan and apply as one batch.
    * ANALYZE emits up to this many ranked plan items; IMPROVE applies them with a per-item
    * backup/verify/keep gate, so ONE fresh full-codebase analysis is amortised over several
-   * changes instead of being discarded after a single pick. Default 3, clamped to 1..8. `1`
+   * changes instead of being discarded after a single pick. Default 8, clamped to 1..16. `1`
    * reproduces the original one-change-per-iteration behaviour exactly.
    */
   readonly improvementBatchSize: number

@@ -204,7 +204,7 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | `threshold` | consecutive `no_improvements` lives until convergence | `5` |
 | `revertThreshold` | consecutive lives keeping 0 until convergence | `3` |
 | `maxIterations` | hard safety cap on total lives | `50` |
-| `improvementBatchSize` | max plan items per life (`1`..`8`; `1` = classic single change) | `3` |
+| `improvementBatchSize` | max plan items per life (`1`..`16`; `1` = classic single change) | `8` |
 | `skipPermissions` | unattended runs: skip the agent's permission prompts | `true` |
 | `commitPerIteration` | git-commit each life's kept changes (`retry-now#NNNN:` prefix) | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | run test/lint after IMPROVE; revert on failure | `false` / `""` |

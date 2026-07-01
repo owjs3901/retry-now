@@ -11,8 +11,8 @@
  *              (NOTE: `~/.codex/prompts/` was REMOVED in Codex ≥ 0.117.0; skills replace it,
  *               and the dir is `.agents/skills/`, NOT `.codex/skills/`.)
  *
- * The command CONDUCTS THE SETUP INTERVIEW when no config exists (scope, analysis, direction,
- * completion, threshold), writes `.retry-now/config.json`, and only then runs the loop — so the
+ * The command CONDUCTS THE SETUP INTERVIEW when no config exists (scope, model, analysis,
+ * direction, completion, threshold), writes `.retry-now/config.json`, and only then runs the loop — so the
  * user is always asked, never dropped straight into a run. The driver command (absolute path)
  * is baked in at install time so no global CLI install is required.
  */
@@ -39,6 +39,14 @@ const RUN_HOW: Record<AgentKind, string> = {
   claude: 'Run exactly this command via the Bash tool and stream its output:',
   codex:
     'Run exactly this command and relay its complete output to the user as it streams:',
+}
+
+/** How the interviewing agent discovers the CURRENT model line-up (never hardcode one). */
+const MODEL_DISCOVERY: Record<AgentKind, string> = {
+  opencode:
+    'run `opencode models` first — its output is the ground truth for what is available',
+  claude: 'list the newest Claude models you know of (latest generation first)',
+  codex: 'list the newest models you know of (latest generation first)',
 }
 
 /** Shared command body: interview-or-confirm (STEP 1) then run the loop (STEP 2). */
@@ -90,9 +98,14 @@ follow-up only when a bench command exists.
    When a bench command exists, also ask how many times to repeat it before/after for a fair median
    (benchRuns, default 5; benchmarks vary by system, so more runs = fairer).
 8. **Batch size (배치 크기 / improvementBatchSize).** How many independent improvements ONE iteration
-   plans and applies as a batch (default 3, range 1..8). One fresh analysis is amortised over the
+   plans and applies as a batch (default 8, range 1..16). One fresh analysis is amortised over the
    whole batch — bigger = fewer iterations and less repeated analysis, but larger commits and more
    per-iteration work. \`1\` reproduces the classic one-change-per-iteration behaviour.
+9. **Model (모델).** Which model id (\`provider/model\`) should every life run on? New, stronger
+   models ship constantly, so ASK the user instead of assuming any specific one — and CENTER the
+   choices on the LATEST models: ${MODEL_DISCOVERY[agent]}, then offer the few newest/strongest
+   coding models as the options, newest first, with the strongest recommended as the default
+   answer. Empty means the agent's own default model.
 
 The loop ALWAYS also hunts and removes **duplicate code** and **dead/unused code** every iteration,
 regardless of the analysis answer — that is baked into the generated prompts, so you need not ask.
@@ -106,7 +119,7 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
 {
   "version": 1,
   "agent": "${agent}",
-  "model": "",
+  "model": "<answer 9 provider/model id, or empty string for the agent default>",
   "agentProfile": "",
   "analysis": "<answer 2>",
   "direction": "<answer 3>",
@@ -121,7 +134,7 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
   "verifyLint": "<detected lint command, or empty string>",
   "benchCommand": "<answer 7 bench command (detected or user-provided), or empty string>",
   "benchRuns": <answer 7 runs, default 5>,
-  "improvementBatchSize": <answer 8, default 3, range 1..8>,
+  "improvementBatchSize": <answer 8, default 8, range 1..16>,
   "targets": [<per-package: selected package paths relative to root e.g. "crates/foo"; whole-repo: []>]
 }
 \`\`\`
@@ -129,7 +142,7 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
 Write ONLY \`.retry-now/config.json\` — the loop regenerates everything else (prompts, .gitignore,
 README) from it on the first run. Then read the config back to the user and confirm.
 
-### If it EXISTS — summarise it (agent, threshold, revert-threshold, targets, verify/bench) and ASK whether to
+### If it EXISTS — summarise it (agent, model, threshold, revert-threshold, targets, verify/bench) and ASK whether to
 proceed as-is or reconfigure. If they reconfigure, re-run the interview above and overwrite the file.
 
 ## STEP 2 — run the loop
