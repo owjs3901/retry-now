@@ -22,11 +22,14 @@ import {
   DEFAULT_BENCH_RUNS,
   DEFAULT_IMPROVEMENT_BATCH_SIZE,
   DEFAULT_MAX_ITERATIONS,
+  DEFAULT_MAX_QUOTA_WAIT_MS,
+  DEFAULT_QUOTA_POLL_MS,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
   loadConfig,
   MAX_IMPROVEMENT_BATCH_SIZE,
   MIN_IMPROVEMENT_BATCH_SIZE,
+  MIN_QUOTA_POLL_MS,
   normalizeConfig,
 } from '../config.ts'
 import { writeJson, writeText } from '../io.ts'
@@ -63,6 +66,9 @@ function validRaw(): Partial<RetryNowConfig> {
     benchCommand: 'bun run bench',
     benchRuns: 9,
     improvementBatchSize: 5,
+    waitForQuota: true,
+    quotaPollMs: 300000,
+    maxQuotaWaitMs: 7200000,
     targets: ['packages/core', 'packages/cli'],
   }
 }
@@ -89,6 +95,9 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
     benchCommand: 'bun run bench',
     benchRuns: 9,
     improvementBatchSize: 5,
+    waitForQuota: true,
+    quotaPollMs: 300000,
+    maxQuotaWaitMs: 7200000,
     targets: ['packages/core', 'packages/cli'],
   })
 })
@@ -183,6 +192,70 @@ test('int helper still falls back for non-numeric thresholds (sanity)', () => {
   expect(out.revertThreshold).toBe(DEFAULT_REVERT_THRESHOLD)
   expect(out.maxIterations).toBe(DEFAULT_MAX_ITERATIONS)
   expect(out.benchRuns).toBe(DEFAULT_BENCH_RUNS)
+})
+
+test('waitForQuota: a non-boolean falls back to the boolean default (false)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      waitForQuota: 'yes',
+    }),
+  )
+  expect(typeof out.waitForQuota).toBe('boolean')
+  expect(out.waitForQuota).toBe(false)
+})
+
+test('quota timings: non-numeric values fall back to their defaults', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      quotaPollMs: 'soon',
+      maxQuotaWaitMs: NaN,
+    }),
+  )
+  expect(out.quotaPollMs).toBe(DEFAULT_QUOTA_POLL_MS)
+  expect(out.maxQuotaWaitMs).toBe(DEFAULT_MAX_QUOTA_WAIT_MS)
+})
+
+test('quotaPollMs: a tiny value is floored to MIN_QUOTA_POLL_MS (no busy-loop)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      quotaPollMs: 5,
+    }),
+  )
+  expect(out.quotaPollMs).toBe(MIN_QUOTA_POLL_MS)
+})
+
+test('maxQuotaWaitMs: a negative value clamps to 0 (no wait)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      maxQuotaWaitMs: -1000,
+    }),
+  )
+  expect(out.maxQuotaWaitMs).toBe(0)
+})
+
+test('quota fields default when omitted (off · 15m poll · 6h cap)', () => {
+  const out = normalizeConfig(
+    bad({ agent: 'opencode', analysis: 'a', direction: 'b', completion: 'c' }),
+  )
+  expect(out.waitForQuota).toBe(false)
+  expect(out.quotaPollMs).toBe(DEFAULT_QUOTA_POLL_MS)
+  expect(out.maxQuotaWaitMs).toBe(DEFAULT_MAX_QUOTA_WAIT_MS)
 })
 
 test('improvementBatchSize: non-numeric falls back to the default and stays in range', () => {

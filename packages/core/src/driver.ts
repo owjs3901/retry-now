@@ -29,6 +29,7 @@ import {
   writeText,
 } from './io.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
+import { quotaExhaustedInLog } from './quota.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
 import { beginPhase, keptCountOf, readSignal } from './signal.ts'
 import {
@@ -182,10 +183,77 @@ function logCrashGuidance(
 }
 
 /**
- * Run a phase, retrying in a fresh session if the agent crashed or emitted no valid signal.
- * Agent processes (opencode / codex / claude) occasionally crash mid-run — e.g. a Bun
- * segmentation fault — and a fresh retry usually recovers. Each iteration is context-0, so
- * re-running is always safe.
+ * Outcome of a resilient phase run:
+ *   - `ok`     — the agent emitted a valid signal (carried here).
+ *   - `quota`  — every account is out of quota (429 / rate-limit); the loop should PAUSE, not
+ *                treat this as a crash (retrying would just burn the next account too).
+ *   - `failed` — a genuine no-signal (likely a crash) after exhausting the retry budget.
+ */
+type PhaseOutcome =
+  | { readonly kind: 'ok'; readonly signal: Signal }
+  | { readonly kind: 'quota' }
+  | { readonly kind: 'failed' }
+
+/** Compact human duration for wait/pause logs: 90000 -> "2m", 21600000 -> "6.0h". */
+function fmtDuration(ms: number): string {
+  if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(1)}h`
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`
+  return `${Math.round(ms / 1000)}s`
+}
+
+/** Guidance shown when the loop pauses because every account is out of quota (NOT a crash). */
+function logQuotaGuidance(
+  log: (line: string) => void,
+  config: RetryNowConfig,
+  paths: Paths,
+): void {
+  log(
+    `  모든 계정의 쿼터가 소진되었습니다(429/rate-limit) — 재시도가 무의미하여 멈춥니다(크래시 아님).`,
+  )
+  log(
+    `  • 진행분은 이미 커밋되어 안전합니다. 쿼터가 다시 차면 재실행으로 마지막 상태부터 이어집니다.`,
+  )
+  log(`  • 로그 확인: ${paths.logsDir}`)
+  if (!config.waitForQuota) {
+    log(
+      `  • 자동 대기·재개를 원하면 config의 \`waitForQuota: true\` 또는 \`--wait-for-quota\` 플래그.`,
+    )
+  }
+}
+
+/** Apply the terminal status + guidance for a non-`ok` phase outcome (quota pause vs crash). */
+function handlePhaseStop(
+  state: LoopState,
+  kind: 'quota' | 'failed',
+  label: string,
+  iter: number,
+  phase: Phase,
+  config: RetryNowConfig,
+  paths: Paths,
+  log: (line: string) => void,
+): void {
+  if (kind === 'quota') {
+    log(
+      `[${label}][${iter}] ${phase}: 모든 계정 쿼터 소진 → paused-quota 정지(쿼터가 차면 재실행으로 재개).`,
+    )
+    logQuotaGuidance(log, config, paths)
+    state.status = 'paused-quota'
+    return
+  }
+  log(
+    `[${label}][${iter}] ${phase}: ${PHASE_ATTEMPTS}회 시도 모두 유효한 신호 없음 → error 정지.`,
+  )
+  logCrashGuidance(log, config, paths)
+  state.status = 'error'
+}
+
+/**
+ * Run a phase, classifying a no-signal run into three outcomes (see `PhaseOutcome`). A crash is
+ * retried in a fresh session (each life is context-0, so a retry is always safe). An
+ * all-accounts-out-of-quota failure is NOT a crash: with `waitForQuota` the driver waits for the
+ * quota to refill (polling every `quotaPollMs`, capped at `maxQuotaWaitMs`, abortable via the
+ * STOP sentinel) and retries the SAME life WITHOUT spending the crash-retry budget; otherwise it
+ * returns `quota` so the loop pauses cleanly instead of stopping with a misleading `error`.
  */
 async function runPhaseResilient(
   paths: Paths,
@@ -196,8 +264,12 @@ async function runPhaseResilient(
   log: (line: string) => void,
   stateDirRel: string,
   scope: string,
-): Promise<Signal | null> {
-  for (let attempt = 1; attempt <= PHASE_ATTEMPTS; attempt++) {
+): Promise<PhaseOutcome> {
+  const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
+  const waitDeadline = Date.now() + config.maxQuotaWaitMs
+  let attempt = 0
+  while (attempt < PHASE_ATTEMPTS) {
+    attempt++
     const sig = await runPhase(
       paths,
       config,
@@ -208,7 +280,27 @@ async function runPhaseResilient(
       stateDirRel,
       scope,
     )
-    if (sig) return sig
+    if (sig) return { kind: 'ok', signal: sig }
+
+    // A no-signal run looks like a crash by exit code, but an out-of-quota wall needs the
+    // opposite handling. Check the agent's own log for a rate-limit / quota error shape.
+    if (!opts.dryRun && (await quotaExhaustedInLog(logPath))) {
+      if (!opts.waitForQuota) return { kind: 'quota' }
+      if (await exists(paths.stop)) return { kind: 'quota' }
+      if (Date.now() >= waitDeadline) {
+        log(
+          `  ⏳ ${phase}: 쿼터가 ${fmtDuration(config.maxQuotaWaitMs)} 동안 회복되지 않음 → paused-quota.`,
+        )
+        return { kind: 'quota' }
+      }
+      log(
+        `  ⏳ ${phase}: 모든 계정 쿼터 소진 — ${fmtDuration(config.quotaPollMs)} 대기 후 재시도(쿼터 충전 대기)…`,
+      )
+      await delay(config.quotaPollMs)
+      attempt-- // a quota wait is not a crash attempt — retry this life without spending budget
+      continue
+    }
+
     if (attempt < PHASE_ATTEMPTS) {
       log(
         `  ! ${phase}: no valid signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — the agent may have crashed. Retrying in a fresh session…`,
@@ -216,7 +308,7 @@ async function runPhaseResilient(
       await delay(2000)
     }
   }
-  return null
+  return { kind: 'failed' }
 }
 
 async function appendHistory(
@@ -434,6 +526,11 @@ async function runOneLoop(
     }
   }
 
+  // Reaching here means the loop is active again — a fresh start, or a resume from a recoverable
+  // stop (`paused-quota` / `error` / a process killed mid-life). Reflect that so a mid-run
+  // snapshot of state.json reads `running`, not the stale pause/error it resumed from.
+  state.status = 'running'
+
   while (true) {
     if (await exists(paths.stop)) {
       log(`[${label}] STOP 감지(.retry-now/STOP). 정지.`)
@@ -472,17 +569,14 @@ async function runOneLoop(
       stateDirRel,
       scope,
     )
-    if (!a) {
-      log(
-        `[${label}][${iter}] analyze: ${PHASE_ATTEMPTS}회 시도 모두 유효한 신호 없음 → error 정지.`,
-      )
-      logCrashGuidance(log, config, paths)
-      state.status = 'error'
+    if (a.kind !== 'ok') {
+      handlePhaseStop(state, a.kind, label, iter, 'analyze', config, paths, log)
       break
     }
-    await appendHistory(paths, iter, 'analyze', a)
+    const analyzeSig = a.signal
+    await appendHistory(paths, iter, 'analyze', analyzeSig)
 
-    if (a.result === 'no_improvements') {
+    if (analyzeSig.result === 'no_improvements') {
       recordNoImprovement(state)
       state.iteration = iter
       await saveState(paths, state)
@@ -492,9 +586,9 @@ async function runOneLoop(
       continue
     }
 
-    const plannedCount = a.plannedImprovements?.length ?? 1
+    const plannedCount = analyzeSig.plannedImprovements?.length ?? 1
     log(
-      `[${label}][${iter}] analyze: 개선 발견 (${plannedCount}개 계획) → '${a.nextImprovement}'. streak 리셋.`,
+      `[${label}][${iter}] analyze: 개선 발견 (${plannedCount}개 계획) → '${analyzeSig.nextImprovement}'. streak 리셋.`,
     )
 
     const b = await runPhaseResilient(
@@ -507,24 +601,21 @@ async function runOneLoop(
       stateDirRel,
       scope,
     )
-    if (!b) {
-      log(
-        `[${label}][${iter}] improve: ${PHASE_ATTEMPTS}회 시도 모두 유효한 신호 없음 → error 정지.`,
-      )
-      logCrashGuidance(log, config, paths)
-      state.status = 'error'
+    if (b.kind !== 'ok') {
+      handlePhaseStop(state, b.kind, label, iter, 'improve', config, paths, log)
       break
     }
-    await appendHistory(paths, iter, 'improve', b)
-    const kept = keptCountOf(b)
+    const improveSig = b.signal
+    await appendHistory(paths, iter, 'improve', improveSig)
+    const kept = keptCountOf(improveSig)
     log(
-      `[${label}][${iter}] improve: ${b.result} — kept ${kept} (${b.metricDelta ?? 'n/a'})`,
+      `[${label}][${iter}] improve: ${improveSig.result} — kept ${kept} (${improveSig.metricDelta ?? 'n/a'})`,
     )
 
     recordImproveOutcome(state, kept)
     if (kept === 0) {
       log(
-        `[${label}][${iter}] 보존된 변경 없음(${b.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
+        `[${label}][${iter}] 보존된 변경 없음(${improveSig.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
       )
     }
     state.iteration = iter
@@ -586,17 +677,20 @@ export async function runLoop(
   await writeOverallSummary(opts.cwd, config, results)
 
   const anyError = results.some((r) => r.result.status === 'error')
+  const anyPaused = results.some((r) => r.result.status === 'paused-quota')
   const anyManual = results.some((r) => r.result.status === 'stopped-manual')
   const allConverged =
     results.length > 0 &&
     results.every((r) => r.result.status === 'stopped-converged')
   const status: LoopState['status'] = anyError
     ? 'error'
-    : allConverged
-      ? 'stopped-converged'
-      : anyManual
-        ? 'stopped-manual'
-        : 'stopped-maxiter'
+    : anyPaused
+      ? 'paused-quota'
+      : allConverged
+        ? 'stopped-converged'
+        : anyManual
+          ? 'stopped-manual'
+          : 'stopped-maxiter'
   const iterations = results.reduce((sum, r) => sum + r.result.iterations, 0)
 
   log('')
@@ -611,6 +705,8 @@ export interface RunProjectOptions {
   readonly dryRun?: boolean
   /** override config.commitPerIteration for this run only */
   readonly commitOverride?: boolean
+  /** override config.waitForQuota for this run only (`--wait-for-quota` / `--no-wait-for-quota`) */
+  readonly waitForQuotaOverride?: boolean
 }
 
 /**
@@ -627,7 +723,11 @@ export async function runProjectLoop(
     opts.commitOverride === undefined
       ? loaded
       : { ...loaded, commitPerIteration: opts.commitOverride }
-  return runLoop(config, { cwd, dryRun: opts.dryRun ?? false })
+  return runLoop(config, {
+    cwd,
+    dryRun: opts.dryRun ?? false,
+    waitForQuota: opts.waitForQuotaOverride ?? config.waitForQuota,
+  })
 }
 
 /**
@@ -643,9 +743,15 @@ export async function runDriverCli(argv: readonly string[]): Promise<number> {
     : argv.includes('--commit')
       ? true
       : undefined
+  const waitForQuotaOverride = argv.includes('--no-wait-for-quota')
+    ? false
+    : argv.includes('--wait-for-quota')
+      ? true
+      : undefined
   const result = await runProjectLoop(cwd, {
     dryRun,
     ...(commitOverride === undefined ? {} : { commitOverride }),
+    ...(waitForQuotaOverride === undefined ? {} : { waitForQuotaOverride }),
   })
   if (!result) {
     console.error(

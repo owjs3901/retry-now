@@ -40,6 +40,9 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     benchCommand: '',
     benchRuns: 5,
     improvementBatchSize: 3,
+    waitForQuota: false,
+    quotaPollMs: 900000,
+    maxQuotaWaitMs: 21600000,
     targets: [],
     ...overrides,
   }

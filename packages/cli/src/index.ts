@@ -39,6 +39,8 @@ interface ParsedArgs {
   readonly dryRun: boolean
   /** undefined = use config; true/false = override commitPerIteration for this run only */
   readonly commitOverride: boolean | undefined
+  /** undefined = use config; true/false = override waitForQuota for this run only */
+  readonly waitForQuotaOverride: boolean | undefined
   /** install to the user-home location instead of the project */
   readonly personal: boolean
 }
@@ -49,12 +51,15 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   let cwd = process.cwd()
   let dryRun = false
   let commitOverride: boolean | undefined
+  let waitForQuotaOverride: boolean | undefined
   let personal = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--dry-run') dryRun = true
     else if (a === '--no-commit') commitOverride = false
     else if (a === '--commit') commitOverride = true
+    else if (a === '--wait-for-quota') waitForQuotaOverride = true
+    else if (a === '--no-wait-for-quota') waitForQuotaOverride = false
     else if (a === '--personal') personal = true
     else if (a === '--cwd') {
       const next = argv[i + 1]
@@ -67,7 +72,15 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       else if (!target) target = a
     }
   }
-  return { command, target, cwd, dryRun, commitOverride, personal }
+  return {
+    command,
+    target,
+    cwd,
+    dryRun,
+    commitOverride,
+    waitForQuotaOverride,
+    personal,
+  }
 }
 
 const USAGE = `retry-now v${VERSION} · 지금 바로 윤회 — 컨텍스트가 매 생마다 0으로 리셋되는 자율 개선 윤회
@@ -86,6 +99,8 @@ usage:
   --dry-run      에이전트 호출 없이 제어 흐름만 시뮬레이션
   --no-commit    이번 실행만 윤회별 git 커밋 끄기 (config 기본값 override)
   --commit       이번 실행만 윤회별 git 커밋 켜기 (config 기본값 override)
+  --wait-for-quota     전 계정 쿼터 소진 시 충전될 때까지 대기 후 자동 재개 (config override)
+  --no-wait-for-quota  쿼터 소진 시 대기 없이 paused-quota로 정지 (config override)
 
 agents:
   opencode → .opencode/command/retry-now.md   (호출: /retry-now)
@@ -105,6 +120,7 @@ async function cmdRun(
   cwd: string,
   dryRun: boolean,
   commitOverride: boolean | undefined,
+  waitForQuotaOverride: boolean | undefined,
 ): Promise<number> {
   let loaded = await loadConfig(cwd)
   if (!loaded) {
@@ -124,7 +140,11 @@ async function cmdRun(
     commitOverride === undefined
       ? loaded
       : { ...loaded, commitPerIteration: commitOverride }
-  const result = await runLoop(config, { cwd, dryRun })
+  const result = await runLoop(config, {
+    cwd,
+    dryRun,
+    waitForQuota: waitForQuotaOverride ?? config.waitForQuota,
+  })
   return result.status === 'error' ? 1 : 0
 }
 
@@ -212,8 +232,15 @@ async function main(): Promise<number> {
     console.log(`retry-now v${VERSION}`)
     return 0
   }
-  const { command, target, cwd, dryRun, commitOverride, personal } =
-    parseArgs(rawArgs)
+  const {
+    command,
+    target,
+    cwd,
+    dryRun,
+    commitOverride,
+    waitForQuotaOverride,
+    personal,
+  } = parseArgs(rawArgs)
   switch (command) {
     case 'version':
       console.log(`retry-now v${VERSION}`)
@@ -221,7 +248,7 @@ async function main(): Promise<number> {
     case 'init':
       return runInit(cwd)
     case 'run':
-      return cmdRun(cwd, dryRun, commitOverride)
+      return cmdRun(cwd, dryRun, commitOverride, waitForQuotaOverride)
     case 'install':
       return runInstall(CLI_ENTRY, target, cwd, personal)
     case 'status':

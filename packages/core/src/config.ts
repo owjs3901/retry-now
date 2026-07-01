@@ -28,6 +28,12 @@ export const DEFAULT_IMPROVEMENT_BATCH_SIZE = 3
 /** Hard bounds on the batch size: 1 (original single-change behaviour) .. 8. */
 export const MIN_IMPROVEMENT_BATCH_SIZE = 1
 export const MAX_IMPROVEMENT_BATCH_SIZE = 8
+/** `waitForQuota` poll interval default: 15 min between quota re-checks. */
+export const DEFAULT_QUOTA_POLL_MS = 15 * 60 * 1000
+/** `waitForQuota` total-wait cap default: 6 h, then stop with `paused-quota`. */
+export const DEFAULT_MAX_QUOTA_WAIT_MS = 6 * 60 * 60 * 1000
+/** Floor on the poll interval so a stray tiny value can't busy-loop the driver. */
+export const MIN_QUOTA_POLL_MS = 1000
 
 export const DEFAULTS: RetryNowConfig = {
   version: 1,
@@ -48,6 +54,9 @@ export const DEFAULTS: RetryNowConfig = {
   benchCommand: '',
   benchRuns: DEFAULT_BENCH_RUNS,
   improvementBatchSize: DEFAULT_IMPROVEMENT_BATCH_SIZE,
+  waitForQuota: false,
+  quotaPollMs: DEFAULT_QUOTA_POLL_MS,
+  maxQuotaWaitMs: DEFAULT_MAX_QUOTA_WAIT_MS,
   targets: [],
 }
 
@@ -136,6 +145,17 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
     benchCommand: str(raw.benchCommand, '').trim(),
     benchRuns,
     improvementBatchSize,
+    waitForQuota: bool(raw.waitForQuota, false),
+    // Floor (not throw): a stray tiny poll interval degrades to a safe minimum rather than
+    // busy-looping; an out-of-range value is a harmless timing knob, not a fatal misconfig.
+    quotaPollMs: Math.max(
+      MIN_QUOTA_POLL_MS,
+      int(raw.quotaPollMs, DEFAULT_QUOTA_POLL_MS),
+    ),
+    maxQuotaWaitMs: Math.max(
+      0,
+      int(raw.maxQuotaWaitMs, DEFAULT_MAX_QUOTA_WAIT_MS),
+    ),
     targets: Array.isArray(raw.targets)
       ? raw.targets
           .filter((t): t is string => typeof t === 'string')

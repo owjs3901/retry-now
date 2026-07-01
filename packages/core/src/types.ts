@@ -94,6 +94,20 @@ export interface RetryNowConfig {
    */
   readonly improvementBatchSize: number
   /**
+   * When every account/credential the agent can use is out of quota (429 / rate-limit),
+   * retrying the same phase immediately is pointless. With this ON, a detected quota
+   * exhaustion PAUSES the loop and waits (re-checking every `quotaPollMs`, up to
+   * `maxQuotaWaitMs`) for the quota to refill, then resumes the SAME life — instead of burning
+   * crash-retries or stopping with a misleading `error`. OFF (default): stop cleanly with
+   * status `paused-quota` so the user re-runs once quota refills. Provider-agnostic: detection
+   * keys on rate-limit error markers in the agent log, not on any specific load balancer.
+   */
+  readonly waitForQuota: boolean
+  /** `waitForQuota` poll interval: how long to wait between quota re-checks. Default 15 min. */
+  readonly quotaPollMs: number
+  /** `waitForQuota` cap: give up and stop with `paused-quota` after this total wait. Default 6 h. */
+  readonly maxQuotaWaitMs: number
+  /**
    * Per-package 윤회 targets — paths relative to root (e.g. "crates/vespera_core"). EMPTY = a
    * single loop over the whole repo. Non-empty (monorepo split mode) = one INDEPENDENT loop per
    * target, each converging on its own and scoped to that path. Chosen at init for monorepos.
@@ -107,6 +121,7 @@ export type LoopStatus =
   | 'stopped-converged' // streak reached threshold — 맺어졌다
   | 'stopped-manual' // STOP sentinel / Ctrl+C
   | 'stopped-maxiter' // safety cap hit
+  | 'paused-quota' // every account out of quota (429/rate-limit) — re-run when it refills
   | 'error' // agent failed to signal twice
 
 /**
@@ -207,6 +222,12 @@ export interface DriverOptions {
   readonly cwd: string
   /** if true, simulate one cycle without spawning any agent process */
   readonly dryRun: boolean
+  /**
+   * When true, a detected all-accounts-out-of-quota failure PAUSES and waits for quota to
+   * refill (then resumes the same life) instead of stopping. Resolved from `--wait-for-quota`
+   * (per-run override) falling back to `config.waitForQuota`.
+   */
+  readonly waitForQuota: boolean
   /** optional progress sink; defaults to console */
   readonly log?: (line: string) => void
 }
