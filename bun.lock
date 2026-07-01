@@ -14,7 +14,7 @@
     },
     "packages/claude": {
       "name": "@retry-now/claude",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "bin": {
         "retry-now-claude": "./dist/index.js",
       },
@@ -24,7 +24,7 @@
     },
     "packages/cli": {
       "name": "@retry-now/cli",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "bin": {
         "retry-now": "./dist/index.js",
       },
@@ -36,7 +36,7 @@
     },
     "packages/codex": {
       "name": "@retry-now/codex",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "bin": {
         "retry-now-codex": "./dist/index.js",
       },
@@ -46,15 +46,15 @@
     },
     "packages/core": {
       "name": "@retry-now/core",
-      "version": "0.1.0",
+      "version": "0.2.1",
     },
     "packages/detect": {
       "name": "@retry-now/detect",
-      "version": "0.1.0",
+      "version": "0.2.1",
     },
     "packages/opencode": {
       "name": "@retry-now/opencode",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "dependencies": {
         "@retry-now/core": "workspace:*",
       },

@@ -99,9 +99,11 @@ jobs:
 
 
       - name: Install dependencies
-        # NOT --frozen-lockfile: after the "Update Versions" PR bumps package.json
-        # versions, this re-syncs bun.lock so `bun pm pack` resolves workspace:*
-        # deps to the just-bumped versions instead of stale ones.
+        # NOT --frozen-lockfile: the "Update Versions" PR bumps each package.json
+        # `version` but does not re-sync bun.lock, so a frozen install would fail.
+        # Publishing no longer trusts the lockfile for workspace:* resolution —
+        # scripts/publish-oidc.sh resolves it from the live package.json files —
+        # so this install only needs to provide deps for the build step below.
         run: bun install
 
 
@@ -110,10 +112,11 @@ jobs:
 
 
       - name: Changepacks
-        # Publishing is delegated to scripts/publish-oidc.sh (bun pm pack -> npm
-        # publish <tarball>) via .changepacks/config.json, so npm's OIDC Trusted
-        # Publishing is used. Provenance is generated automatically under OIDC —
-        # no NPM_TOKEN and no --provenance flag needed.
+        # Publishing is delegated to scripts/publish-oidc.sh (resolve workspace:*
+        # from live package.json -> npm pack -> npm publish <tarball>) via
+        # .changepacks/config.json, so npm's OIDC Trusted Publishing is used.
+        # Provenance is generated automatically under OIDC — no NPM_TOKEN and no
+        # --provenance flag needed.
         uses: changepacks/action@main
         id: changepacks
         with:
