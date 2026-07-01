@@ -1,1 +1,0 @@
-{"changes":{"packages/opencode/package.json":"Patch","packages/cli/package.json":"Patch","packages/codex/package.json":"Patch","packages/detect/package.json":"Patch","packages/core/package.json":"Patch","packages/claude/package.json":"Patch"},"note":"Fix deploy script","date":"2026-07-01T11:43:35.336380500Z"}
