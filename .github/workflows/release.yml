@@ -85,9 +85,22 @@ jobs:
           bun-version: "1.3.9"
 
 
+      # npm (not bun) does the actual publish: bun cannot perform the npm OIDC
+      # token exchange (oven-sh/bun#15601). Trusted Publishing needs npm >= 11.5.1.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+
+      - name: Ensure npm >= 11.5.1 (OIDC Trusted Publishing)
+        # Node 24.0.0 bundles npm 11.3.0 (too old); force a version with OIDC support.
+        run: npm install -g npm@latest
+
+
       - name: Install dependencies
         # NOT --frozen-lockfile: after the "Update Versions" PR bumps package.json
-        # versions, this re-syncs bun.lock so `bun publish` resolves workspace:*
+        # versions, this re-syncs bun.lock so `bun pm pack` resolves workspace:*
         # deps to the just-bumped versions instead of stale ones.
         run: bun install
 
@@ -97,10 +110,12 @@ jobs:
 
 
       - name: Changepacks
+        # Publishing is delegated to scripts/publish-oidc.sh (bun pm pack -> npm
+        # publish <tarball>) via .changepacks/config.json, so npm's OIDC Trusted
+        # Publishing is used. Provenance is generated automatically under OIDC —
+        # no NPM_TOKEN and no --provenance flag needed.
         uses: changepacks/action@main
         id: changepacks
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           publish: true
-        env:
-          NPM_CONFIG_PROVENANCE: "true"

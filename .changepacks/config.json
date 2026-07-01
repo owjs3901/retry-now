@@ -1,5 +1,11 @@
 {
   "ignore": ["*", "!packages/*/package.json"],
   "baseBranch": "main",
-  "latestPackage": null
+  "latestPackage": null,
+  "publish": {
+    "node": "bash \"$GITHUB_WORKSPACE/scripts/publish-oidc.sh\""
+  },
+  "publishDryRun": {
+    "node": "bash \"$GITHUB_WORKSPACE/scripts/publish-oidc.sh\" --dry-run"
+  }
 }
