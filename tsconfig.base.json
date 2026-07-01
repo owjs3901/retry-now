@@ -4,7 +4,10 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "customConditions": ["source"],
+    "paths": {
+      "@retry-now/core": ["./packages/core/src/index.ts"],
+      "@retry-now/detect": ["./packages/detect/src/index.ts"]
+    },
     "lib": ["ESNext"],
     "types": ["bun"],
     "strict": true,

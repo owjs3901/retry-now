@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# npm/bun pack tarballs (never commit or publish these)
+*.tgz
+
 # runtime loop state (when retry-now is used on THIS repo itself)
 .retry-now/
 

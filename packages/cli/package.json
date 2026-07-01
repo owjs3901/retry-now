@@ -26,7 +26,6 @@
     "@clack/prompts": "^1.6.0"
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ]
 }

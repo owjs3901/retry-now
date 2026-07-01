@@ -15,8 +15,6 @@
   "description": "Dependency-free capability detector. Inspects a project root and reports which test/lint/benchmark commands are runnable across rust/go/python/node ecosystems.",
   "exports": {
     ".": {
-      "source": "./src/index.ts",
-      "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
@@ -29,7 +27,6 @@
     "build": "bun build ./src/index.ts --outdir dist --target node --packages external && dts-bundle-generator -o dist/index.d.ts src/index.ts --no-check"
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ]
 }
