@@ -12,7 +12,7 @@
  *   - the exact signal JSON contract.
  *
  * `stateDir` is the on-disk dir the agent reads/writes state from — `.retry-now` for a
- * whole-repo loop, or `.retry-now/targets/<slug>` for a per-package (분할) 윤회 so each target's
+ * whole-repo loop, or `.retry-now/targets/<slug>` for a per-package loop so each target's
  * signal / reports / backups / ledger stay isolated. `scope` (when non-empty) restricts the run
  * to a single package path. These prompts are sent to the agent every reincarnation, so they
  * are written in English (fewer tokens than Korean); the user-facing CLI/theme stay Korean.
@@ -63,7 +63,7 @@ function signalShapeImprove(stateDir: string): string {
 /** Baked per-package scope block (empty for a whole-repo loop). */
 function scopeSection(scope: string, what: string): string {
   if (scope === '') return ''
-  return `## 0b. Scope (per-package 윤회)
+  return `## 0b. Scope (per-package loop)
 
 This run is scoped to a SINGLE package: **${scope}**. Restrict ALL ${what} STRICTLY to that
 path; ignore the rest of the repo.
