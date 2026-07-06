@@ -11,6 +11,7 @@
  *   2. malformed input → falls back to the documented default (no `TypeError`, no
  *      runtime type lie typed as `RetryNowConfig`).
  */
+
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,6 +52,9 @@ function validRaw(): Partial<RetryNowConfig> {
     version: 1,
     agent: 'opencode',
     model: 'anthropic/claude-opus-4-7',
+    analysisModel: 'openai/gpt-5.5-analyze',
+    improveModel: 'openai/gpt-5.5-implement',
+    modelVariant: 'xhigh',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -80,6 +84,9 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
     version: 1,
     agent: 'opencode',
     model: 'anthropic/claude-opus-4-7',
+    analysisModel: 'openai/gpt-5.5-analyze',
+    improveModel: 'openai/gpt-5.5-implement',
+    modelVariant: 'xhigh',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -171,6 +178,49 @@ test('non-string model falls back to "" (no .trim crash on an object)', () => {
     }),
   )
   expect(out.model).toBe('')
+})
+
+test('phase-specific models fall back to the legacy shared model when omitted', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      model: 'openai/shared',
+    }),
+  )
+  expect(out.analysisModel).toBe('openai/shared')
+  expect(out.improveModel).toBe('openai/shared')
+})
+
+test('phase-specific model ids override the legacy shared model', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      model: 'openai/shared',
+      analysisModel: 'openai/analyzer',
+      improveModel: 'openai/implementer',
+    }),
+  )
+  expect(out.analysisModel).toBe('openai/analyzer')
+  expect(out.improveModel).toBe('openai/implementer')
+})
+
+test('non-string modelVariant falls back to "" (no .trim crash on an object)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      modelVariant: { effort: 'max' },
+    }),
+  )
+  expect(out.modelVariant).toBe('')
 })
 
 test('int helper still falls back for non-numeric thresholds (sanity)', () => {

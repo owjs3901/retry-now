@@ -26,6 +26,12 @@ export interface RetryNowConfig {
   readonly agent: AgentKind
   /** optional explicit model id (provider/model); empty = agent default */
   readonly model: string
+  /** optional ANALYZE-phase model id; empty = `model` fallback, then agent default */
+  readonly analysisModel: string
+  /** optional IMPROVE/sub-implementation model id; empty = `model` fallback, then agent default */
+  readonly improveModel: string
+  /** optional provider-specific model variant (opencode `--variant`); empty = default */
+  readonly modelVariant: string
   /** optional agent profile name (opencode `--agent`); empty = default */
   readonly agentProfile: string
   /**

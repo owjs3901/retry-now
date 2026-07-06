@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { join } from 'node:path'
 
-import { AGENT_LABEL, buildAgentCommand } from './agents.ts'
+import { AGENT_LABEL, buildAgentCommand, modelForPhase } from './agents.ts'
 import { loadConfig } from './config.ts'
 import {
   appendLine,
@@ -39,8 +39,13 @@ import {
   saveState,
 } from './state.ts'
 import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
-import type { LoopState, Phase, RetryNowConfig, Signal } from './types.ts'
-import type { DriverOptions } from './types.ts'
+import type {
+  DriverOptions,
+  LoopState,
+  Phase,
+  RetryNowConfig,
+  Signal,
+} from './types.ts'
 
 function composeMessage(
   iter: number,
@@ -145,9 +150,11 @@ async function runPhase(
     const { cmd, args } = buildAgentCommand(
       config,
       composeMessage(iter, phase, stateDirRel, scope),
+      phase,
     )
     const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
-    log(`  ↳ ${AGENT_LABEL[config.agent]} ${phase} (fresh session)…`)
+    const model = modelForPhase(config, phase) || 'agent default'
+    log(`  ↳ ${AGENT_LABEL[config.agent]} ${phase} (${model}, fresh session)…`)
     const code = await runAgent(cmd, args, paths.root, logPath, log)
     if (code !== 0) log(`  ! agent exited with code ${code} (see ${logPath})`)
   }
@@ -313,6 +320,7 @@ async function runPhaseResilient(
 
 async function appendHistory(
   paths: Paths,
+  config: RetryNowConfig,
   iter: number,
   phase: Phase,
   sig: Signal,
@@ -324,6 +332,8 @@ async function appendHistory(
       iteration: iter,
       phase,
       result: sig.result,
+      agent: config.agent,
+      model: modelForPhase(config, phase) || 'agent default',
       summary: sig.summary,
       report: sig.report,
       ...(sig.nextImprovement ? { nextImprovement: sig.nextImprovement } : {}),
@@ -343,6 +353,9 @@ async function appendHistory(
       ...(typeof sig.skippedCount === 'number'
         ? { skippedCount: sig.skippedCount }
         : {}),
+      ...(sig.appliedImprovements
+        ? { appliedImprovements: sig.appliedImprovements }
+        : {}),
     }),
   )
 }
@@ -361,6 +374,9 @@ interface HistoryEntry {
   revertedCount?: number
   failedCount?: number
   skippedCount?: number
+  agent?: string
+  model?: string
+  appliedImprovements?: Signal['appliedImprovements']
 }
 
 function escCell(s: string): string {
@@ -397,6 +413,19 @@ async function writeSummary(
   const analyzeYes = entries.filter(
     (e) => e.phase === 'analyze' && e.result === 'improvements_found',
   ).length
+  const plannedTotal = entries
+    .filter((e) => e.phase === 'analyze')
+    .reduce((sum, e) => sum + (e.plannedCount ?? 0), 0)
+  const itemKept = improves.reduce((sum, e) => sum + (e.keptCount ?? 0), 0)
+  const itemReverted = improves.reduce(
+    (sum, e) => sum + (e.revertedCount ?? 0),
+    0,
+  )
+  const itemFailed = improves.reduce((sum, e) => sum + (e.failedCount ?? 0), 0)
+  const itemSkipped = improves.reduce(
+    (sum, e) => sum + (e.skippedCount ?? 0),
+    0,
+  )
 
   const out: string[] = [
     target
@@ -408,7 +437,8 @@ async function writeSummary(
     `- iterations: ${state.iteration}`,
     `- final streak: ${state.noImprovementStreak}/${config.threshold}`,
     `- final revert-streak: ${state.revertStreak}/${config.revertThreshold}`,
-    `- agent: ${config.agent}${config.model ? ` (${config.model})` : ''}`,
+    `- analyze agent/model: ${config.agent} / ${modelForPhase(config, 'analyze') || 'agent default'}`,
+    `- improve agent/model: ${config.agent} / ${modelForPhase(config, 'improve') || 'agent default'}`,
     `- commit-per-iteration: ${config.commitPerIteration ? 'on' : 'off'}`,
     `- started: ${state.startedAt}`,
     `- ended: ${state.updatedAt}`,
@@ -416,8 +446,28 @@ async function writeSummary(
     '## 집계',
     `- analyze: 개선발견 ${analyzeYes} · 개선없음 ${analyzeNo}`,
     `- improve: applied ${applied.length} · reverted ${reverted} · failed ${failed}`,
+    `- planned improvements: ${plannedTotal}`,
+    `- item outcomes: 적용/성공(kept, 더 나아짐) ${itemKept} · reverted ${itemReverted} · failed ${itemFailed} · skipped ${itemSkipped}`,
     '',
   ]
+
+  const itemRows = improves.flatMap((e) =>
+    (e.appliedImprovements ?? []).map((item) => ({ entry: e, item })),
+  )
+  if (itemRows.length > 0) {
+    out.push(
+      '## 개선사항별 결과와 이유',
+      '',
+      '| iter | id | status | model | improvement | reason |',
+      '|---|---|---|---|---|---|',
+    )
+    for (const row of itemRows) {
+      out.push(
+        `| ${pad(row.entry.iteration)} | ${escCell(row.item.id)} | ${row.item.status} | ${escCell(row.entry.model ?? 'agent default')} | ${escCell(row.item.title)} | ${escCell(row.item.summary ?? row.item.metricDelta ?? '-')} |`,
+      )
+    }
+    out.push('')
+  }
 
   if (applied.length > 0) {
     out.push('## 적용된 개선 (KEEP)')
@@ -468,7 +518,8 @@ async function writeOverallSummary(
     '# retry-now — 전체 윤회 종합 보고서 (overall)',
     '',
     `- mode: per-package (분할 윤회) — ${results.length} target(s)`,
-    `- agent: ${config.agent}${config.model ? ` (${config.model})` : ''}`,
+    `- analyze agent/model: ${config.agent} / ${modelForPhase(config, 'analyze') || 'agent default'}`,
+    `- improve agent/model: ${config.agent} / ${modelForPhase(config, 'improve') || 'agent default'}`,
     `- threshold: ${config.threshold}`,
     '',
     '## 타겟별 결과',
@@ -574,7 +625,7 @@ async function runOneLoop(
       break
     }
     const analyzeSig = a.signal
-    await appendHistory(paths, iter, 'analyze', analyzeSig)
+    await appendHistory(paths, config, iter, 'analyze', analyzeSig)
 
     if (analyzeSig.result === 'no_improvements') {
       recordNoImprovement(state)
@@ -606,7 +657,7 @@ async function runOneLoop(
       break
     }
     const improveSig = b.signal
-    await appendHistory(paths, iter, 'improve', improveSig)
+    await appendHistory(paths, config, iter, 'improve', improveSig)
     const kept = keptCountOf(improveSig)
     log(
       `[${label}][${iter}] improve: ${improveSig.result} — kept ${kept} (${improveSig.metricDelta ?? 'n/a'})`,
@@ -650,6 +701,7 @@ export async function runLoop(
   log(BANNER)
   log(
     `agent=${AGENT_LABEL[config.agent]}  stop-after=${config.threshold} no-improve / ${config.revertThreshold} reverts  ` +
+      `analyze-model=${modelForPhase(config, 'analyze') || 'agent default'}  improve-model=${modelForPhase(config, 'improve') || 'agent default'}  ` +
       `max-iters=${config.maxIterations}  commit=${config.commitPerIteration ? 'on' : 'off'}  ` +
       `bench=${config.benchCommand ? `on×${config.benchRuns}` : 'off'}` +
       `${config.targets.length > 0 ? `  targets=${config.targets.length}` : ''}${opts.dryRun ? '  [DRY-RUN]' : ''}`,

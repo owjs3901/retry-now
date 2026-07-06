@@ -170,8 +170,9 @@ async function cmdStatus(cwd: string): Promise<number> {
   }
   const paths = resolvePaths(cwd)
   console.log(BANNER)
+  console.log(`agent      : ${AGENT_LABEL[config.agent]}`)
   console.log(
-    `agent      : ${AGENT_LABEL[config.agent]}${config.model ? ` (${config.model})` : ''}`,
+    `models     : analyze=${config.analysisModel || config.model || 'agent default'} / improve=${config.improveModel || config.model || 'agent default'}`,
   )
   console.log(`threshold  : ${config.threshold} 생 연속 개선없음이면 맺어짐`)
   console.log(

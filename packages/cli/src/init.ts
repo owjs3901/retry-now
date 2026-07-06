@@ -60,13 +60,21 @@ export async function runInit(cwd: string): Promise<number> {
   })) as AgentKind | symbol
   if (cancelled(agent)) return cancel()
 
-  const model = (await p.text({
+  const analysisModel = (await p.text({
     message:
-      '모델 id (provider/model). 비워두면 에이전트 기본값 — 새 모델이 계속 나오니 최신 모델 중심으로 직접 지정.',
+      '분석 모델 id (provider/model). 비워두면 에이전트 기본값 — 읽기/계획에 쓸 모델.',
     placeholder: 'provider/model',
     defaultValue: '',
   })) as string | symbol
-  if (cancelled(model)) return cancel()
+  if (cancelled(analysisModel)) return cancel()
+
+  const improveModel = (await p.text({
+    message:
+      '구현 모델 id (provider/model). 비워두면 에이전트 기본값 — 각 개선 항목의 순차 sub-implementation에 쓸 모델.',
+    placeholder: 'provider/model',
+    defaultValue: '',
+  })) as string | symbol
+  if (cancelled(improveModel)) return cancel()
 
   const analysis = (await p.text({
     message: '1. 분석 및 계획 — 무엇을 분석/계획할지',
@@ -256,7 +264,8 @@ export async function runInit(cwd: string): Promise<number> {
   try {
     config = normalizeConfig({
       agent,
-      model,
+      analysisModel,
+      improveModel,
       analysis,
       direction,
       completion,
@@ -285,6 +294,7 @@ export async function runInit(cwd: string): Promise<number> {
       config.targets.length > 0
         ? `윤회 모드: 패키지별 분할 (${config.targets.length}개 타겟, 각자 독립 수렴)`
         : `윤회 모드: 전체 레포 단일 윤회`,
+      `모델: 분석=${config.analysisModel || 'agent default'} / 구현=${config.improveModel || 'agent default'}`,
       `수렴: ${config.threshold}생 연속 개선없음 또는 ${config.revertThreshold}생 연속 전체 리버트`,
       config.benchCommand
         ? `벤치마크: ${config.benchCommand} (before/after ${config.benchRuns}회 중앙값, 회귀 시 리버트)`

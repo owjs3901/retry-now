@@ -25,6 +25,9 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     version: 1,
     agent: 'opencode',
     model: '',
+    analysisModel: '',
+    improveModel: '',
+    modelVariant: '',
     agentProfile: '',
     analysis: 'ANALYSIS_SENTINEL',
     direction: 'DIRECTION_SENTINEL',
@@ -158,4 +161,28 @@ test('improve prompt renders the opposite branches: commits OFF, benchmark prese
   expect(out).toContain('Git commits — DISABLED')
   expect(out).toContain('This project HAS a benchmark')
   expect(out).toContain('no automated test/lint configured')
+})
+
+test('prompts expose separate analyze/improve models and forbid parallel implementation', () => {
+  const analyze = buildAnalyzePrompt(
+    cfg({
+      analysisModel: 'openai/analyzer',
+      improveModel: 'openai/implementer',
+    }),
+  )
+  const improve = buildImprovePrompt(
+    cfg({
+      analysisModel: 'openai/analyzer',
+      improveModel: 'openai/implementer',
+    }),
+  )
+
+  expect(analyze).toContain('opencode / openai/analyzer')
+  expect(improve).toContain('opencode / openai/implementer')
+  expect(improve).toContain('Implementation parallelism is FORBIDDEN')
+  expect(improve).toContain('separate fresh sub-implementation agent/session')
+  expect(improve).toContain('planned: <count>')
+  expect(improve).toContain(
+    'applied/kept (successful, genuinely better): <count>',
+  )
 })
