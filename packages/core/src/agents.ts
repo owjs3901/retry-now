@@ -10,17 +10,30 @@
  *   claude    -p "<msg>" --bare  (--bare ⇒ clean slate: skips  code.claude.com/docs/en/headless
  *             CLAUDE.md/hooks/skills/MCP — ideal for unbiased rebirth)
  */
-import type { AgentKind, RetryNowConfig } from './types.ts'
+import type { AgentKind, Phase, RetryNowConfig } from './types.ts'
 
 export interface AgentCommand {
   readonly cmd: string
   readonly args: readonly string[]
 }
 
+export class UnknownAgentError extends Error {
+  constructor(agent: never) {
+    super(`unknown agent: ${String(agent)}`)
+    this.name = 'UnknownAgentError'
+  }
+}
+
 export const AGENT_LABEL: Record<AgentKind, string> = {
   opencode: 'opencode',
   codex: 'codex',
   claude: 'claude code',
+}
+
+export function modelForPhase(config: RetryNowConfig, phase: Phase): string {
+  const phaseModel =
+    phase === 'analyze' ? config.analysisModel : config.improveModel
+  return phaseModel || config.model
 }
 
 /**
@@ -31,12 +44,15 @@ export const AGENT_LABEL: Record<AgentKind, string> = {
 export function buildAgentCommand(
   config: RetryNowConfig,
   message: string,
+  phase: Phase,
 ): AgentCommand {
+  const model = modelForPhase(config, phase)
   switch (config.agent) {
     case 'opencode': {
       const args: string[] = ['run', message]
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
-      if (config.model) args.push('--model', config.model)
+      if (model) args.push('--model', model)
+      if (config.modelVariant) args.push('--variant', config.modelVariant)
       if (config.agentProfile) args.push('--agent', config.agentProfile)
       return { cmd: 'opencode', args }
     }
@@ -49,7 +65,7 @@ export function buildAgentCommand(
         args.push('--sandbox', 'workspace-write')
       }
       args.push('--skip-git-repo-check')
-      if (config.model) args.push('--model', config.model)
+      if (model) args.push('--model', model)
       args.push(message) // prompt is the trailing positional
       return { cmd: 'codex', args }
     }
@@ -63,9 +79,10 @@ export function buildAgentCommand(
         'text',
         '--no-session-persistence',
       ]
-      if (config.model) args.push('--model', config.model)
+      if (model) args.push('--model', model)
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
       return { cmd: 'claude', args }
     }
   }
+  throw new UnknownAgentError(config.agent)
 }

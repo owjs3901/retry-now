@@ -62,12 +62,13 @@ function runtimeReadme(config: RetryNowConfig): string {
 ${oathBlock()}
 
 핵심 원칙: 매 이터레이션은 새 \`${config.agent}\` 세션으로 **컨텍스트가 0으로 환생**한다.
+분석 모델: \`${config.analysisModel || config.model || 'agent default'}\`. 구현 모델: \`${config.improveModel || config.model || 'agent default'}\`.
 이터레이션을 가로지르는 유일한 상태는 \`state.json\`의 **연속 no-improvement 스트릭**뿐이며,
 이는 드라이버가 소유한다. ANALYZE는 이전 리포트/렉저/히스토리/state를 **읽지 않는다**(편향 금지).
 
 매 ANALYZE는 한 번의 무편향 분석으로 **최대 \`${config.improvementBatchSize}\`개**를 배치로 계획하고,
-IMPROVE가 항목별 백업→적용→체크포인트 검증으로 **각각 보존/되돌림**한다(부분 성공 허용). 한 번의 분석을
-배치 전체에 분산하므로 분석 토큰이 윤회마다 버려지지 않는다. (\`improvementBatchSize = 1\`이면 항목 1개 = 옛 동작.)
+IMPROVE가 구현 병렬화 없이 항목별로 별도 sub-implementation agent/session을 순차 생성해 백업→적용→체크포인트 검증으로 **각각 보존/되돌림**한다(부분 성공 허용). 한 번의 분석을
+배치 전체에 분산하므로 분석 토큰이 윤회마다 버려지지 않고, 각 항목은 독립적으로 벤치마크/리포트된다. (\`improvementBatchSize = 1\`이면 항목 1개 = 옛 동작.)
 
 윤회는 ANALYZE가 \`${config.threshold}\`생 연속 \`no_improvements\`를 내거나, IMPROVE가
 \`${config.revertThreshold}\`생 연속 **한 항목도 보존하지 못하면(배치 kept 0)** **맺어졌다(수렴)**고

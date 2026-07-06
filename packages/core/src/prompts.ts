@@ -20,6 +20,10 @@
 import { DIR } from './paths.ts'
 import type { RetryNowConfig } from './types.ts'
 
+function displayModel(model: string): string {
+  return model === '' ? '(agent default)' : model
+}
+
 function signalShapeAnalyze(stateDir: string): string {
   return `{
   "iteration": <N>,
@@ -98,6 +102,8 @@ context 0). All cross-run state is on disk and most of it is forbidden to you.
 ---
 
 ## 0. Load context
+
+Agent/model for this phase: ${config.agent} / ${displayModel(config.analysisModel || config.model)}.
 
 1. \`${stateDir}/current.json\` — your \`iteration\` number and zero-padded \`padded\` id (e.g.
    \`0012\`), used only to name your output files.
@@ -315,6 +321,8 @@ ANALYZE phase of THIS iteration found an improvement. All state is on disk.
 
 ## 0. Load context (this iteration only)
 
+Agent/model for this phase and its per-item sub-implementation agents: ${config.agent} / ${displayModel(config.improveModel || config.model)}.
+
 1. \`${stateDir}/current.json\` — your \`iteration\` and zero-padded \`padded\` id.
 2. \`${stateDir}/signal.json\` — the analyze result; \`plannedImprovements\` is your ordered work list.
 3. \`${stateDir}/reports/<PADDED>-analyze.md\` — THIS iteration's analysis. Its
@@ -326,6 +334,15 @@ Execute the batch plan: apply its items IN ORDER, each one INDEPENDENTLY backed 
 kept-or-reverted, so every kept change stays attributable even though the batch ships together. A
 batch may be a PARTIAL success — keeping the good items and rolling back only the bad ones is the
 expected, correct outcome, not a failure. Never turn the batch into one big sweeping rewrite.
+
+CRITICAL — sequential sub-implementation rule:
+- Implementation parallelism is FORBIDDEN. Never start item N+1 until item N has a final
+  kept/reverted/failed/skipped decision and its reason is recorded.
+- For each planned item, use a separate fresh sub-implementation agent/session when your agent
+  surface supports it. Give that sub-agent ONLY this one item, the relevant target files, the
+  benchmark/verification commands, and the required output for that item. Wait for it to finish,
+  then benchmark/verify/decide before creating the next sub-agent. If no sub-agent tool is
+  available, do the item yourself, but keep the same one-item-at-a-time context discipline.
 
 ---
 
@@ -346,9 +363,10 @@ Work the plan items in order. For EACH item \`<id>\`:
 - Back up first: COPY every file that item will modify into \`${stateDir}/backups/<PADDED>/item-<id>/\`,
   preserving relative paths. These per-item backups are your ONLY revert source — the loop
   deliberately does NOT use git for revert, so it never disturbs unrelated working-tree changes.
-- Implement EXACTLY that one item from the analyze spec. Smallest correct change. No suppressed
-  warnings, no type-escape casts, no unjustified unsafe operations. Obey the project's convention
-  docs.
+- Implement EXACTLY that one item from the analyze spec, preferably by delegating to exactly one
+  fresh sub-implementation agent for that item and waiting for it before continuing. Smallest
+  correct change. No suppressed warnings, no type-escape casts, no unjustified unsafe operations.
+  Obey the project's convention docs.
 - If a LATER item turns out to be already satisfied or invalidated by an EARLIER kept item, do
   NOT force it — mark it \`skipped\` and move on.
 
@@ -399,7 +417,13 @@ iteration's items group together):
 
 Write \`${stateDir}/reports/<PADDED>-improve.md\`: the batch outcome (kept / reverted / failed /
 skipped counts) and, for EVERY item, its id, title, files touched, before/after key numbers where
-measured, and the decision + reason. Make each kept item independently reviewable.
+measured, the implementation model used, and the decision + reason. Start the report with:
+- planned: <count>
+- applied/kept (successful, genuinely better): <count>
+- reverted: <count> with reasons
+- failed: <count> with reasons
+- skipped: <count> with reasons
+Make each kept item independently reviewable.
 
 ---
 

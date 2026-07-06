@@ -70,8 +70,11 @@ flowchart TD
    cited by `file:line`, and produces a **BATCH PLAN** of up to `improvementBatchSize` **independently
    revertible** items. Then it writes a one-way `signal.json` to the driver. This phase **never** runs
    build/test/lint "to confirm" — that's the next phase's job.
-2. **IMPROVE** *(only when ANALYZE found something)* — works the plan **item by item**: back up the files it
-   will touch, make the smallest correct change, then verify in checkpoint groups. On a regression (or a
+2. **IMPROVE** *(only when ANALYZE found something)* — works the plan **item by item** with implementation
+   parallelism forbidden. When the agent surface supports subagents, each item is handed to a fresh
+   sub-implementation session using the configured implementation model, then the driver/agent waits and
+   decides before starting the next item. It backs up the files it will touch, makes the smallest correct change,
+   then verifies in checkpoint groups. On a regression (or a
    failing test/lint) it reverts **only that item** from its backup and keeps the good ones. A partial success
    is not a failure but the **correct, expected** outcome — it never rewrites everything in one sweep.
 3. **The driver** records the result, updates the streaks in `state.json`, and reincarnates again — until a
@@ -198,7 +201,9 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | Field | Meaning | Default |
 |---|---|---|
 | `agent` | `opencode` \| `codex` \| `claude` | `opencode` |
-| `model` | `provider/model` id; empty = agent default | `""` |
+| `model` | legacy shared `provider/model` fallback; empty = agent default | `""` |
+| `analysisModel` | model for ANALYZE; empty = `model`, then agent default | `""` |
+| `improveModel` | model for IMPROVE and per-item sub-implementation; empty = `model`, then agent default | `""` |
 | `agentProfile` | opencode `--agent` profile; empty = default | `""` |
 | `analysis` / `direction` / `completion` | the three intent prompts above | — (required) |
 | `threshold` | consecutive `no_improvements` lives until convergence | `5` |
