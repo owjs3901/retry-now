@@ -37,6 +37,34 @@ export function modelForPhase(config: RetryNowConfig, phase: Phase): string {
 }
 
 /**
+ * The highest-tier opencode `--variant` to use when the user configured none — so an unattended
+ * loop always runs at maximum reasoning effort by default. The top tier is provider-specific
+ * (OpenAI's is `xhigh`, Anthropic's is `max`), so key off the model id's `provider/` prefix;
+ * anything else — including an agent-default model with no id — floors to `max`.
+ */
+export function topVariantForModel(model: string): string {
+  const provider = (model.split('/', 1)[0] ?? '').toLowerCase()
+  return provider === 'openai' ? 'xhigh' : 'max'
+}
+
+/**
+ * The opencode `--variant` for this phase. Mirrors `modelForPhase`: the phase-specific variant
+ * wins, then the shared `modelVariant`, and when BOTH are empty it falls back to the highest tier
+ * for this phase's model (`topVariantForModel`) — so "no setting" means "top grade", never "off".
+ * This is what lets ANALYZE and IMPROVE carry DIFFERENT top-tier variants (e.g. Anthropic `max`
+ * for analyze, OpenAI `xhigh` for improve) even though one reincarnation passes a single `--variant`.
+ */
+export function variantForPhase(config: RetryNowConfig, phase: Phase): string {
+  const phaseVariant =
+    phase === 'analyze' ? config.analysisVariant : config.improveVariant
+  return (
+    phaseVariant ||
+    config.modelVariant ||
+    topVariantForModel(modelForPhase(config, phase))
+  )
+}
+
+/**
  * Build the argv for one reincarnation. `message` is the full instruction handed to the
  * fresh agent (the driver composes it; see driver.ts). argv is passed directly to spawn —
  * NOT through a shell — so the prompt needs no shell escaping.
@@ -52,7 +80,8 @@ export function buildAgentCommand(
       const args: string[] = ['run', message]
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
       if (model) args.push('--model', model)
-      if (config.modelVariant) args.push('--variant', config.modelVariant)
+      const variant = variantForPhase(config, phase)
+      if (variant) args.push('--variant', variant)
       if (config.agentProfile) args.push('--agent', config.agentProfile)
       return { cmd: 'opencode', args }
     }

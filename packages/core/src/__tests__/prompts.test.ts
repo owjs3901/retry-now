@@ -28,6 +28,8 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     analysisModel: '',
     improveModel: '',
     modelVariant: '',
+    analysisVariant: '',
+    improveVariant: '',
     agentProfile: '',
     analysis: 'ANALYSIS_SENTINEL',
     direction: 'DIRECTION_SENTINEL',
@@ -184,5 +186,28 @@ test('prompts expose separate analyze/improve models and forbid parallel impleme
   expect(improve).toContain('planned: <count>')
   expect(improve).toContain(
     'applied/kept (successful, genuinely better): <count>',
+  )
+})
+
+test('improve prompt makes leaving a CLEAN working tree a terminal obligation before the signal', () => {
+  const out = buildImprovePrompt(cfg())
+  expect(out).toContain('Leave the working tree CLEAN (terminal obligation)')
+  expect(out).toContain('NEVER a dirty tree of unexplained edits')
+})
+
+test('the clean-tree terminal obligation is improve-only (analyze never carries it)', () => {
+  expect(buildAnalyzePrompt(cfg())).not.toContain(
+    'Leave the working tree CLEAN',
+  )
+})
+
+test('improve prompt forbids reverting a kept item over a commit/signing failure', () => {
+  const out = buildImprovePrompt(cfg())
+  expect(out).toContain(
+    'a commit or signing failure is NOT a verification failure',
+  )
+  expect(out).toContain('Kept stays kept.')
+  expect(out).toContain(
+    'NEVER revert a kept change merely because its commit could not be signed',
   )
 })

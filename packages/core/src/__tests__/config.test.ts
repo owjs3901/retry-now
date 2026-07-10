@@ -55,6 +55,8 @@ function validRaw(): Partial<RetryNowConfig> {
     analysisModel: 'openai/gpt-5.5-analyze',
     improveModel: 'openai/gpt-5.5-implement',
     modelVariant: 'xhigh',
+    analysisVariant: 'max',
+    improveVariant: 'xhigh',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -87,6 +89,8 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
     analysisModel: 'openai/gpt-5.5-analyze',
     improveModel: 'openai/gpt-5.5-implement',
     modelVariant: 'xhigh',
+    analysisVariant: 'max',
+    improveVariant: 'xhigh',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -221,6 +225,61 @@ test('non-string modelVariant falls back to "" (no .trim crash on an object)', (
     }),
   )
   expect(out.modelVariant).toBe('')
+})
+
+test('phase-specific variants fall back to the shared modelVariant when omitted', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      modelVariant: 'xhigh',
+    }),
+  )
+  expect(out.analysisVariant).toBe('xhigh')
+  expect(out.improveVariant).toBe('xhigh')
+})
+
+test('phase-specific variants override the shared modelVariant', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      modelVariant: 'xhigh',
+      analysisVariant: 'max',
+      improveVariant: 'high',
+    }),
+  )
+  expect(out.analysisVariant).toBe('max')
+  expect(out.improveVariant).toBe('high')
+})
+
+test('non-string phase variants fall back to the shared modelVariant (no .trim crash)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      modelVariant: 'xhigh',
+      analysisVariant: { effort: 'max' },
+      improveVariant: 42,
+    }),
+  )
+  expect(out.analysisVariant).toBe('xhigh')
+  expect(out.improveVariant).toBe('xhigh')
+})
+
+test('variants stay empty when neither per-phase nor shared is set (the adapter fills the top tier)', () => {
+  const out = normalizeConfig(
+    bad({ agent: 'opencode', analysis: 'a', direction: 'b', completion: 'c' }),
+  )
+  expect(out.modelVariant).toBe('')
+  expect(out.analysisVariant).toBe('')
+  expect(out.improveVariant).toBe('')
 })
 
 test('int helper still falls back for non-numeric thresholds (sanity)', () => {
