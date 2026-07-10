@@ -11,6 +11,8 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     analysisModel: '',
     improveModel: '',
     modelVariant: '',
+    analysisVariant: '',
+    improveVariant: '',
     agentProfile: '',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -59,6 +61,82 @@ test('opencode command passes highest model variant separately from model and ag
       'build',
     ],
   })
+})
+
+/** The value opencode would receive for `--variant`, or undefined when the flag is absent. */
+function variantOf(args: readonly string[]): string | undefined {
+  const i = args.indexOf('--variant')
+  return i >= 0 ? args[i + 1] : undefined
+}
+
+test('opencode defaults an unset variant to the model top tier (openai→xhigh, else→max)', () => {
+  const analyze = buildAgentCommand(
+    cfg({ analysisModel: 'anthropic/claude-opus-4-8' }),
+    'analyze',
+    'analyze',
+  )
+  const improve = buildAgentCommand(
+    cfg({ improveModel: 'openai/gpt-5.6-sol' }),
+    'improve',
+    'improve',
+  )
+
+  expect(variantOf(analyze.args)).toBe('max')
+  expect(variantOf(improve.args)).toBe('xhigh')
+})
+
+test('opencode gives analyze and improve their OWN top-tier variant from one config (the split)', () => {
+  const config = cfg({
+    analysisModel: 'anthropic/claude-opus-4-8',
+    improveModel: 'openai/gpt-5.6-sol',
+  })
+
+  expect(variantOf(buildAgentCommand(config, 'analyze', 'analyze').args)).toBe(
+    'max',
+  )
+  expect(variantOf(buildAgentCommand(config, 'improve', 'improve').args)).toBe(
+    'xhigh',
+  )
+})
+
+test('an explicit per-phase variant overrides both the shared variant and the auto top tier', () => {
+  const analyze = buildAgentCommand(
+    cfg({
+      analysisModel: 'openai/gpt-5.6-sol', // auto would be xhigh
+      modelVariant: 'medium', // shared is overridden too
+      analysisVariant: 'high', // explicit per-phase wins
+    }),
+    'analyze',
+    'analyze',
+  )
+
+  expect(variantOf(analyze.args)).toBe('high')
+})
+
+test('the shared modelVariant overrides the auto top tier when no per-phase variant is set', () => {
+  const improve = buildAgentCommand(
+    cfg({ improveModel: 'openai/gpt-5.6-sol', modelVariant: 'medium' }),
+    'improve',
+    'improve',
+  )
+
+  expect(variantOf(improve.args)).toBe('medium')
+})
+
+test('non-opencode agents never receive --variant even though a top tier is always resolvable', () => {
+  const codex = buildAgentCommand(
+    cfg({ agent: 'codex', improveModel: 'openai/gpt-5.6-sol' }),
+    'improve',
+    'improve',
+  )
+  const claude = buildAgentCommand(
+    cfg({ agent: 'claude', analysisModel: 'anthropic/claude-opus-4-8' }),
+    'analyze',
+    'analyze',
+  )
+
+  expect(codex.args).not.toContain('--variant')
+  expect(claude.args).not.toContain('--variant')
 })
 
 test('command uses phase-specific model over shared legacy model', () => {

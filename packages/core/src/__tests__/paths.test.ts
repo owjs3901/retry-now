@@ -1,10 +1,10 @@
 /**
  * `@retry-now/core` path layout — the single source of truth for the `.retry-now/` tree.
  *
- * Two invariants matter: SHARED files (config/prompts/gitignore/readme/STOP) always live at
- * `.retry-now/`, while STATEFUL files (state/signal/current/history/ledger/summary/reports/logs)
- * relocate under `.retry-now/targets/<slug>/` for a per-package 윤회. `slugifyTarget` must make any
- * path filesystem-safe, and `pad` must zero-pad iteration ids for stable file names.
+ * Two invariants matter: SHARED files (config/prompts/gitignore/readme/STOP/driver.lock) always
+ * live at `.retry-now/`, while STATEFUL files (state/signal/current/history/ledger/summary/reports/
+ * logs) relocate under `.retry-now/targets/<slug>/` for a per-package 윤회. `slugifyTarget` must make
+ * any path filesystem-safe, and `pad` must zero-pad iteration ids for stable file names.
  */
 import { join } from 'node:path'
 
@@ -36,6 +36,7 @@ test('resolvePaths (whole-repo): every file sits directly under <root>/.retry-no
   expect(p.state).toBe(join(base, 'state.json'))
   expect(p.reportsDir).toBe(join(base, 'reports'))
   expect(p.analyzePrompt).toBe(join(base, 'prompts', 'analyze.md'))
+  expect(p.driverLock).toBe(join(base, 'driver.lock'))
 })
 
 test('resolvePaths (per-package): stateful files relocate under targets/<slug>, shared stay at root', () => {
@@ -47,6 +48,7 @@ test('resolvePaths (per-package): stateful files relocate under targets/<slug>, 
   expect(p.config).toBe(join(base, 'config.json'))
   expect(p.gitignore).toBe(join(base, '.gitignore'))
   expect(p.stop).toBe(join(base, 'STOP'))
+  expect(p.driverLock).toBe(join(base, 'driver.lock'))
   // ...STATEFUL relocate under the target slug.
   expect(p.state).toBe(join(stateDir, 'state.json'))
   expect(p.signal).toBe(join(stateDir, 'signal.json'))

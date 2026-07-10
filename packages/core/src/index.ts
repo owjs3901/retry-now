@@ -6,7 +6,13 @@
  * no-improvement streak; the loop ends when the improvement is 맺어진다 (converged).
  */
 
-export { AGENT_LABEL, type AgentCommand, buildAgentCommand } from './agents.ts'
+export {
+  AGENT_LABEL,
+  type AgentCommand,
+  buildAgentCommand,
+  topVariantForModel,
+  variantForPhase,
+} from './agents.ts'
 export {
   AGENT_KINDS,
   ConfigError,
@@ -33,6 +39,21 @@ export {
   type FrontendInstallResult,
   installFrontend,
 } from './frontends.ts'
+export {
+  commitPaths,
+  type GitResult,
+  type GitRunner,
+  isGitRepo,
+  runGit,
+  statusPorcelain,
+} from './git.ts'
+export {
+  acquireDriverLock,
+  type DriverLock,
+  isPidAlive,
+  type LockResult,
+  releaseDriverLock,
+} from './lock.ts'
 export { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 export { buildAnalyzePrompt, buildImprovePrompt } from './prompts.ts'
 export { scaffold } from './scaffold.ts'

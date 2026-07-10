@@ -21,6 +21,7 @@ export interface Paths {
   readonly ledger: string
   readonly summary: string // final comprehensive loop report
   readonly stop: string // STOP sentinel
+  readonly driverLock: string // single-instance guard (project-level, shared across targets)
   readonly readme: string
   readonly promptsDir: string
   readonly analyzePrompt: string
@@ -53,6 +54,7 @@ export function resolvePaths(root: string, targetSlug?: string): Paths {
     analyzePrompt: join(stateDir, 'prompts', 'analyze.md'),
     improvePrompt: join(stateDir, 'prompts', 'improve.md'),
     stop: join(dir, 'STOP'),
+    driverLock: join(dir, 'driver.lock'),
     state: join(stateDir, 'state.json'),
     signal: join(stateDir, 'signal.json'),
     current: join(stateDir, 'current.json'),

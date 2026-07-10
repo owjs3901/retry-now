@@ -252,6 +252,14 @@ Per-iteration git commits are ON. After the decision gate, ONLY if at least one 
   \`gpg failed to sign the data\`, \`No secret key\`, or a pinentry/passphrase prompt), retry the
   SAME commit once with \`--no-gpg-sign\` (e.g. \`git commit --no-gpg-sign -m "retry-now#<PADDED>: …"\`)
   so signing can never block the iteration. Landing the change matters more than the signature here.
+- CRITICAL — a commit or signing failure is NOT a verification failure and is NEVER grounds to revert
+  or fail an item. The keep/revert decision in §4 is FINAL and was made BEFORE this commit; a
+  signature or commit problem happens AFTER it and cannot change it. If \`git commit\` fails for ANY
+  reason (signing, hooks, anything), your ONLY response is to make the SAME commit land — first with
+  \`--no-gpg-sign\`, and if even that fails, LEAVE the kept changes staged in the working tree (the
+  driver commits them). NEVER restore a kept item from its backup, re-run verification, downgrade it
+  to \`reverted\`/\`failed\`, or turn the batch \`result\` into \`applied_reverted\`/\`failed\` because a
+  commit did not go through. Kept stays kept.
 - If NOTHING was kept (\`keptCount = 0\`), do NOT commit.
 `
     : `
@@ -424,6 +432,21 @@ measured, the implementation model used, and the decision + reason. Start the re
 - failed: <count> with reasons
 - skipped: <count> with reasons
 Make each kept item independently reviewable.
+
+---
+
+## 6b. Leave the working tree CLEAN (terminal obligation)
+
+Before you emit the signal, the working tree MUST hold nothing you left half-done: every KEPT item
+is handled per §4b (committed when commits are on — or, if a signing failure blocked even the
+\`--no-gpg-sign\` retry, left cleanly STAGED for the driver to commit — otherwise, with commits off,
+left for the user), and every reverted/failed/skipped item's files are FULLY restored from their
+\`${stateDir}/backups/<PADDED>/item-<id>/\` backup. Run \`git status\` and confirm the ONLY changes
+present are your kept edits — no stray modification you introduced and did not either keep or
+revert. A life ends EITHER "improved ⇒ kept (committed, or staged when signing blocked the commit)"
+OR "nothing kept ⇒ everything you touched reverted"; NEVER a dirty tree of unexplained edits, and
+NEVER revert a kept change merely because its commit could not be signed. Restore your own stray
+edits before signalling.
 
 ---
 

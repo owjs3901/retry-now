@@ -1,0 +1,141 @@
+/**
+ * `@retry-now/core` git helpers — the driver's surgical, non-destructive git access.
+ *
+ * These back the "loop end ⇒ clean tree" guarantee: `commitPaths` lets the driver commit EXACTLY
+ * the files a kept batch produced when the agent forgot to (never a blanket add), and
+ * `statusPorcelain` lets it observe residue to WARN about. The happy paths run against a REAL temp
+ * git repo (matching the io/config test style); the failure/branch paths use an injected fake
+ * `GitRunner` so signing-retry and error handling are exercised deterministically.
+ */
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { afterAll, beforeAll, expect, test } from 'bun:test'
+
+import {
+  commitPaths,
+  type GitRunner,
+  isGitRepo,
+  runGit,
+  statusPorcelain,
+} from '../git.ts'
+
+let repo: string
+
+beforeAll(async () => {
+  repo = await mkdtemp(join(tmpdir(), 'retry-now-git-'))
+  await runGit(['init'], repo)
+  await runGit(['config', 'user.email', 'test@retry-now.local'], repo)
+  await runGit(['config', 'user.name', 'retry-now test'], repo)
+  await runGit(['config', 'commit.gpgsign', 'false'], repo)
+})
+
+afterAll(async () => {
+  await rm(repo, { recursive: true, force: true })
+})
+
+test('runGit: a successful command resolves code 0 with stdout', async () => {
+  const r = await runGit(['--version'], repo)
+  expect(r.code).toBe(0)
+  expect(r.stdout.toLowerCase()).toContain('git version')
+})
+
+test('runGit: an unknown subcommand resolves non-zero with stderr', async () => {
+  const r = await runGit(['definitely-not-a-real-subcommand'], repo)
+  expect(r.code).not.toBe(0)
+  expect(r.stderr.length).toBeGreaterThan(0)
+})
+
+test('runGit: a spawn failure (missing cwd) resolves code -1 and never throws', async () => {
+  const r = await runGit(['--version'], join(repo, 'no', 'such', 'dir'))
+  expect(r.code).toBe(-1)
+})
+
+test('isGitRepo: true inside a repo, false outside one', async () => {
+  expect(await isGitRepo(repo)).toBe(true)
+  const bare = await mkdtemp(join(tmpdir(), 'retry-now-nogit-'))
+  try {
+    expect(await isGitRepo(bare)).toBe(false)
+  } finally {
+    await rm(bare, { recursive: true, force: true })
+  }
+})
+
+test('statusPorcelain: [] on a clean tree, lists changes, and scopes by pathspec', async () => {
+  expect(await statusPorcelain(repo)).toEqual([])
+
+  await writeFile(join(repo, 'a.txt'), 'hello\n')
+  await mkdir(join(repo, 'sub'), { recursive: true })
+  await writeFile(join(repo, 'sub', 'b.txt'), 'world\n')
+
+  const all = await statusPorcelain(repo)
+  expect(all.some((l) => l.endsWith('a.txt'))).toBe(true)
+  expect(all.some((l) => l.includes('sub'))).toBe(true)
+
+  const scoped = await statusPorcelain(repo, ['sub'])
+  expect(scoped.length).toBeGreaterThan(0)
+  expect(scoped.every((l) => l.includes('sub'))).toBe(true)
+  expect(scoped.some((l) => l.endsWith('a.txt'))).toBe(false)
+})
+
+test('statusPorcelain: a failed query yields [] (never throws)', async () => {
+  const failing: GitRunner = () =>
+    Promise.resolve({ code: 1, stdout: '', stderr: 'boom' })
+  expect(await statusPorcelain(repo, [], failing)).toEqual([])
+})
+
+test('commitPaths: commits EXACTLY the given files, leaving other changes untouched', async () => {
+  const res = await commitPaths(
+    repo,
+    ['a.txt'],
+    'retry-now#0001: commit a.txt only',
+  )
+  expect(res.code).toBe(0)
+
+  const after = await statusPorcelain(repo)
+  expect(after.some((l) => l.endsWith('a.txt'))).toBe(false) // committed → gone from status
+  expect(after.some((l) => l.includes('sub'))).toBe(true) // sub/b.txt left untracked, untouched
+})
+
+test('commitPaths: a failed first commit (e.g. signing) is retried once with --no-gpg-sign', async () => {
+  const calls: string[][] = []
+  const fake: GitRunner = (args) => {
+    calls.push([...args])
+    if (args[0] === 'commit' && !args.includes('--no-gpg-sign')) {
+      return Promise.resolve({
+        code: 128,
+        stdout: '',
+        stderr: 'error: gpg failed to sign the data',
+      })
+    }
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' })
+  }
+  const res = await commitPaths('/x', ['f.txt'], 'msg', fake)
+  expect(res.code).toBe(0)
+  expect(
+    calls.some((c) => c[0] === 'commit' && c.includes('--no-gpg-sign')),
+  ).toBe(true)
+})
+
+test('commitPaths: retries with --no-gpg-sign on ANY commit failure and returns the retry result', async () => {
+  const commits: string[][] = []
+  const fake: GitRunner = (args) => {
+    if (args[0] !== 'commit') {
+      return Promise.resolve({ code: 0, stdout: '', stderr: '' })
+    }
+    commits.push([...args])
+    // A NON-signing first failure must STILL be retried without signing (unattended = land it).
+    return args.includes('--no-gpg-sign')
+      ? Promise.resolve({ code: 7, stdout: '', stderr: 'retry also failed' })
+      : Promise.resolve({
+          code: 1,
+          stdout: '',
+          stderr: 'some unrelated commit problem',
+        })
+  }
+  const res = await commitPaths('/x', ['f.txt'], 'msg', fake)
+  expect(commits.length).toBe(2) // retried even though it was not a signing failure
+  expect(commits[1]?.includes('--no-gpg-sign')).toBe(true)
+  expect(res.code).toBe(7) // the retry's result is what is returned
+})

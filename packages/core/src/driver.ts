@@ -20,6 +20,13 @@ import { join } from 'node:path'
 import { AGENT_LABEL, buildAgentCommand, modelForPhase } from './agents.ts'
 import { loadConfig } from './config.ts'
 import {
+  commitPaths,
+  type GitRunner,
+  isGitRepo,
+  runGit,
+  statusPorcelain,
+} from './git.ts'
+import {
   appendLine,
   ensureDir,
   exists,
@@ -28,17 +35,24 @@ import {
   writeJson,
   writeText,
 } from './io.ts'
+import { acquireDriverLock, releaseDriverLock } from './lock.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 import { quotaExhaustedInLog } from './quota.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
-import { beginPhase, keptCountOf, readSignal } from './signal.ts'
+import { beginPhase, keptCountOf, keptFilesOf, readSignal } from './signal.ts'
 import {
   loadState,
   recordImproveOutcome,
   recordNoImprovement,
   saveState,
 } from './state.ts'
-import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
+import {
+  BANNER,
+  commitPrefix,
+  converged,
+  rebirth,
+  revertConverged,
+} from './theme.ts'
 import type {
   DriverOptions,
   LoopState,
@@ -389,6 +403,7 @@ async function writeSummary(
   state: LoopState,
   config: RetryNowConfig,
   target?: string,
+  residue: readonly string[] = [],
 ): Promise<void> {
   const raw = (await readText(paths.history)) ?? ''
   const entries: HistoryEntry[] = []
@@ -450,6 +465,20 @@ async function writeSummary(
     `- item outcomes: 적용/성공(kept, 더 나아짐) ${itemKept} · reverted ${itemReverted} · failed ${itemFailed} · skipped ${itemSkipped}`,
     '',
   ]
+
+  if (residue.length > 0) {
+    out.push(
+      '## ⚠ 미정리 변경 (커밋/리버트 안 됨 — 검토 필요)',
+      '',
+      '루프 종료 시 워킹트리에 남아 있던 변경입니다. 개선으로 커밋되지도, 회귀로 리버트되지도 않았습니다.',
+      '',
+      '```',
+      ...residue.slice(0, 50),
+      ...(residue.length > 50 ? [`… (+${residue.length - 50} more)`] : []),
+      '```',
+      '',
+    )
+  }
 
   const itemRows = improves.flatMap((e) =>
     (e.appliedImprovements ?? []).map((item) => ({ entry: e, item })),
@@ -541,6 +570,59 @@ export interface DriverResult {
   readonly iterations: number
   readonly finalStreak: number
   readonly threshold: number
+}
+
+/**
+ * COMMIT-FALLBACK. When commits are on and a batch KEPT ≥1 item but the agent left those kept
+ * files uncommitted (it forgot, ran out of budget, or its own commit failed), the driver commits
+ * EXACTLY the kept files itself — so the "improved ⇒ committed" half of the clean-tree invariant
+ * holds even when the agent slips. It stages ONLY the files the signal names as kept (never a
+ * blanket `git add -A`), so unrelated working-tree changes are never swept in, and it is
+ * best-effort: any git failure is logged, never fatal (the loop must not wedge while unattended).
+ */
+async function reconcileKeptCommit(
+  paths: Paths,
+  config: RetryNowConfig,
+  iter: number,
+  sig: Signal,
+  log: (line: string) => void,
+  git: GitRunner = runGit,
+): Promise<void> {
+  if (!config.commitPerIteration) return
+  if (keptCountOf(sig) === 0) return
+  const files = keptFilesOf(sig)
+  // No attributable files → committing safely is impossible; the end-of-loop check will surface it.
+  if (files.length === 0) return
+  if (!(await isGitRepo(paths.root, git))) return
+  const dirty = await statusPorcelain(paths.root, files, git)
+  if (dirty.length === 0) return // agent already committed its kept files — nothing to do
+  const message = `${commitPrefix(pad(iter))}commit-fallback — ${keptCountOf(sig)} kept item(s) left uncommitted by the agent`
+  const res = await commitPaths(paths.root, files, message, git)
+  if (res.code === 0) {
+    log(
+      `  ✓ commit-fallback: committed ${files.length} kept file(s) the agent had left uncommitted.`,
+    )
+  } else {
+    log(
+      `  ! commit-fallback: could not commit kept files (git exit ${res.code}) — left in the working tree for review.`,
+    )
+  }
+}
+
+/**
+ * The working-tree changes still present when a loop settles. The invariant is that a finished
+ * loop leaves a CLEAN tree (every life either committed its kept changes or reverted everything
+ * else), so anything here is residue to SURFACE — never to auto-discard (unrelated user changes
+ * must never be clobbered). Scoped to `scope` in per-package mode; `.retry-now/` is gitignored and
+ * never appears. A non-repo project yields an empty list.
+ */
+async function residualWorkingTree(
+  root: string,
+  scope: string,
+  git: GitRunner = runGit,
+): Promise<string[]> {
+  if (!(await isGitRepo(root, git))) return []
+  return statusPorcelain(root, scope ? [scope] : [], git)
 }
 
 /** Run ONE independent loop (whole-repo when target is null, else scoped to the target path). */
@@ -669,12 +751,29 @@ async function runOneLoop(
         `[${label}][${iter}] 보존된 변경 없음(${improveSig.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
       )
     }
+    // Safety net: if the agent kept items but left them uncommitted, commit exactly those files so
+    // this life ends with its improvement recorded, not dangling in the working tree.
+    if (!opts.dryRun) {
+      await reconcileKeptCommit(paths, config, iter, improveSig, log)
+    }
     state.iteration = iter
     await saveState(paths, state)
   }
 
   await saveState(paths, state)
-  await writeSummary(paths, state, config, target ?? undefined)
+  // The invariant: a finished loop leaves a CLEAN tree. Surface (never auto-discard) any residue —
+  // e.g. a crashed IMPROVE's leftovers or a rogue ANALYZE edit — so the user can review it.
+  const residue = opts.dryRun
+    ? []
+    : await residualWorkingTree(paths.root, scope)
+  if (residue.length > 0) {
+    log(
+      `[${label}] ⚠ 종료 시 워킹트리에 미정리 변경 ${residue.length}건 — 커밋도 리버트도 안 됨(검토 필요):`,
+    )
+    for (const line of residue.slice(0, 20)) log(`    ${line}`)
+    if (residue.length > 20) log(`    … (+${residue.length - 20} 건 더)`)
+  }
+  await writeSummary(paths, state, config, target ?? undefined, residue)
   log(
     `[${label}] 종료: status=${state.status} iters=${state.iteration} streak=${state.noImprovementStreak}/${config.threshold}`,
   )
@@ -691,13 +790,47 @@ async function runOneLoop(
  * Run the loop(s) to a terminal state. Whole-repo when `config.targets` is empty, else one
  * independent loop per target. Resolves an aggregate result when everything stops.
  */
+/**
+ * Run the loop(s) under a project-local single-instance lock. A SECOND driver launched on the SAME
+ * project is refused — that same-project double-run is the ONLY way `.retry-now/` state can contend.
+ * Drivers on DIFFERENT projects each own their own `.retry-now/` and never conflict, so several
+ * `bun` driver processes at once (one per project) is normal, NOT contention.
+ */
 export async function runLoop(
   config: RetryNowConfig,
   opts: DriverOptions,
 ): Promise<DriverResult> {
   const log = opts.log ?? ((line: string) => console.log(line))
-  await scaffold(opts.cwd, config, false) // shared config/gitignore/readme + root prompts
+  const paths = resolvePaths(opts.cwd)
+  // Materialise .retry-now/ first (the lock file lives inside it), then take the project-local lock.
+  await scaffold(opts.cwd, config, false)
+  const lock = await acquireDriverLock(paths.driverLock, opts.cwd)
+  if (!lock.ok) {
+    log(
+      `이미 이 프로젝트에서 윤회가 돌고 있습니다 (pid ${lock.holder.pid}, 시작 ${lock.holder.startedAt}). 중복 드라이버를 띄우지 않았습니다.`,
+    )
+    log(
+      `참고: .retry-now/ 는 프로젝트 로컬 — 다른 프로젝트의 드라이버가 여럿 보여도 경합이 아닙니다(각자 자기 폴더). 멈추려면 .retry-now/STOP.`,
+    )
+    return {
+      status: 'stopped-manual',
+      iterations: 0,
+      finalStreak: 0,
+      threshold: config.threshold,
+    }
+  }
+  try {
+    return await runLoopBody(config, opts, log)
+  } finally {
+    await releaseDriverLock(paths.driverLock)
+  }
+}
 
+async function runLoopBody(
+  config: RetryNowConfig,
+  opts: DriverOptions,
+  log: (line: string) => void,
+): Promise<DriverResult> {
   log(BANNER)
   log(
     `agent=${AGENT_LABEL[config.agent]}  stop-after=${config.threshold} no-improve / ${config.revertThreshold} reverts  ` +

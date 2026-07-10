@@ -58,6 +58,8 @@ function runtimeReadme(config: RetryNowConfig): string {
 
 Runtime state for retry-now. **Everything here is git-ignored** by an inner ".gitignore" containing "*".
 
+**Project-local — no cross-project contention.** This folder belongs to THIS project alone; a driver only ever reads/writes here. Running retry-now on several projects at once is fine and expected — one \`bun\` driver process per project, each isolated in its own \`.retry-now/\`, so they NEVER contend. Do NOT kill "extra" driver processes just because you see several — they are different projects. Only a SECOND driver on the SAME project would contend, and \`driver.lock\` already prevents that (a stale lock left by a killed run is reclaimed automatically).
+
 Core rule: every iteration starts a fresh \`${config.agent}\` session with context reset to zero.
 Analyze model: \`${config.analysisModel || config.model || 'agent default'}\`. Improve model: \`${config.improveModel || config.model || 'agent default'}\`.
 Only \`state.json\` carries driver-owned streaks across iterations. ANALYZE must not read prior reports, ledger, history, state, or old logs.
@@ -88,6 +90,7 @@ Benchmark: ${benchDesc}. A final \`summary.md\` is generated when the loop stops
 | \`backups/NNNN/\` | IMPROVE backups for item-level revert. |
 | \`logs/iter-NNNN-*.log\` | Raw agent stdout/stderr. |
 | \`STOP\` | Create to stop at the next boundary. |
+| \`driver.lock\` | Single-instance guard (pid). Prevents a 2nd driver on THIS project; a stale one is reclaimed. |
 
 ## Stop / resume / reset
 - Stop: create \`.retry-now/STOP\`.

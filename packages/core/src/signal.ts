@@ -204,3 +204,20 @@ export function keptCountOf(sig: Signal): number {
   }
   return sig.result === 'applied' ? 1 : 0
 }
+
+/**
+ * The union of files touched by every KEPT batch item — the driver's commit-fallback scope.
+ *
+ * When an IMPROVE agent kept changes but failed to commit them, these are the ONLY paths the
+ * driver stages, so the fallback commits exactly the kept work and never sweeps unrelated
+ * working-tree changes. Empty when no kept item reported files (the fallback then commits nothing
+ * and the leftover is surfaced by the driver's end-of-loop clean-tree warning instead).
+ */
+export function keptFilesOf(sig: Signal): string[] {
+  const files = new Set<string>()
+  for (const item of sig.appliedImprovements ?? []) {
+    if (item.status !== 'kept') continue
+    for (const f of item.files ?? []) files.add(f)
+  }
+  return [...files]
+}

@@ -42,6 +42,8 @@ export const DEFAULTS: RetryNowConfig = {
   analysisModel: '',
   improveModel: '',
   modelVariant: '',
+  analysisVariant: '',
+  improveVariant: '',
   agentProfile: '',
   analysis: '',
   direction: '',
@@ -136,6 +138,11 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
     analysisModel: str(raw.analysisModel, str(raw.model, '')).trim(),
     improveModel: str(raw.improveModel, str(raw.model, '')).trim(),
     modelVariant: str(raw.modelVariant, '').trim(),
+    // Per-phase variants fall back to the shared `modelVariant` (exactly how `analysisModel`/
+    // `improveModel` fall back to `model` above), so a single shared variant still works while a
+    // provider-split loop can give each phase its own top tier (Anthropic `max` / OpenAI `xhigh`).
+    analysisVariant: str(raw.analysisVariant, str(raw.modelVariant, '')).trim(),
+    improveVariant: str(raw.improveVariant, str(raw.modelVariant, '')).trim(),
     agentProfile: str(raw.agentProfile, '').trim(),
     analysis,
     direction,

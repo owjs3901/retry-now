@@ -156,7 +156,13 @@ ${runLine}
 The loop spawns a brand-new zero-context session each iteration and stops itself on convergence,
 a \`.retry-now/STOP\` file, or the safety cap. Relay its progress (per-iteration rebirth /
 streak / convergence) to the user as it appears. Do NOT modify files yourself — the loop's own
-iterations do that.`
+iterations do that.
+
+Single instance & NO cross-project contention: \`.retry-now/\` is project-local, so running retry-now
+on several projects at once is fine — one \`bun\` driver process per project, each isolated in its own
+folder, NEVER contending. Seeing multiple driver processes is normal; do NOT kill them to "avoid a
+race". A second driver on the SAME project is refused automatically via \`.retry-now/driver.lock\`, so
+you never need to clean up drivers by hand.`
 }
 
 function opencodeCommand(driverCommand: string): FrontendFile {

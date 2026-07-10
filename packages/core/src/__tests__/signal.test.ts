@@ -18,6 +18,7 @@ import { resolvePaths } from '../paths.ts'
 import {
   beginPhase,
   keptCountOf,
+  keptFilesOf,
   normalizeSignal,
   readSignal,
 } from '../signal.ts'
@@ -77,6 +78,50 @@ test('legacy single-change signal: result "applied" maps to 1 kept', () => {
 test('legacy single-change signal: a reverted/failed result maps to 0 kept', () => {
   expect(keptCountOf(improveSignal({ result: 'applied_reverted' }))).toBe(0)
   expect(keptCountOf(improveSignal({ result: 'failed' }))).toBe(0)
+})
+
+// --- keptFilesOf: the driver's commit-fallback scope (only KEPT items' files) ---
+
+test('keptFilesOf: unions the files of every KEPT item, de-duped', () => {
+  const sig = improveSignal({
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'a',
+        status: 'kept',
+        files: ['src/a.ts', 'src/shared.ts'],
+      },
+      { id: '2', title: 'b', status: 'reverted', files: ['src/b.ts'] }, // excluded
+      {
+        id: '3',
+        title: 'c',
+        status: 'kept',
+        files: ['src/c.ts', 'src/shared.ts'],
+      }, // dedupes shared
+      { id: '4', title: 'd', status: 'kept' }, // kept but no files → contributes nothing
+    ],
+  })
+  expect(keptFilesOf(sig).sort()).toEqual([
+    'src/a.ts',
+    'src/c.ts',
+    'src/shared.ts',
+  ])
+})
+
+test('keptFilesOf: empty when there is no appliedImprovements array', () => {
+  expect(keptFilesOf(improveSignal({ keptCount: 2 }))).toEqual([])
+})
+
+test('keptFilesOf: excludes files of reverted/failed/skipped items', () => {
+  const sig = improveSignal({
+    result: 'applied_reverted',
+    appliedImprovements: [
+      { id: '1', title: 'a', status: 'reverted', files: ['src/a.ts'] },
+      { id: '2', title: 'b', status: 'failed', files: ['src/b.ts'] },
+      { id: '3', title: 'c', status: 'skipped', files: ['src/c.ts'] },
+    ],
+  })
+  expect(keptFilesOf(sig)).toEqual([])
 })
 
 // --- normalizeSignal: the parse-don't-validate gate at the agent→driver boundary ---
