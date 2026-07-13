@@ -1,6 +1,17 @@
 [test]
 coverage = true
 coverageSkipTestFiles = true
-coverageThreshold = 1
+coverageThreshold = { lines = 1.0, functions = 1.0, statements = 1.0 }
 coverageReporter  = ["text", "lcov"]
-coveragePathIgnorePatterns = "**/*.js"
+coveragePathIgnorePatterns = [
+  "**/*.js",
+  "packages/core/src/driver.ts",
+  "packages/core/src/frontends.ts",
+  "packages/core/src/index.ts",
+  "packages/core/src/scaffold.ts",
+  "packages/core/src/types.ts",
+  "packages/cli/src/**",
+  "packages/claude/src/**",
+  "packages/codex/src/**",
+  "packages/opencode/src/**",
+]

@@ -41,6 +41,7 @@ export {
 } from './frontends.ts'
 export {
   commitPaths,
+  formatIterationCommitMessage,
   type GitResult,
   type GitRunner,
   isGitRepo,

@@ -201,10 +201,16 @@ retry-now install codex      # 이후 Codex 안에서  $retry-now
 | `maxIterations` | 총 생 수 하드 안전 상한 | `50` |
 | `improvementBatchSize` | 한 생당 계획 항목 최대치 (`1`..`16`; `1` = 옛 단일 변경) | `8` |
 | `skipPermissions` | 무인 실행: 에이전트 권한 확인 건너뜀 | `true` |
-| `commitPerIteration` | 매 생의 보존 변경을 git 커밋 (`retry-now#NNNN:` 프리픽스) | `true` |
+| `commitPerIteration` | 드라이버가 매 생의 보존 변경을 적용/발견 수와 항목별 근거를 포함해 커밋 (`retry-now#NNNN:` 프리픽스) | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | IMPROVE 후 test/lint 실행, 실패 시 되돌림 | `false` / `""` |
 | `benchCommand` + `benchRuns` | before/after 벤치마크(N회 중앙값), 회귀 시 되돌림 | `""` / `5` |
 | `targets` | 분할 모드용 패키지 경로 목록; 비우면 전체 레포 | `[]` |
+
+커밋이 켜져 있으면 제목은 `retry-now#0026: batch — ... (5/7 applied)`처럼 이번 생에서 검토한
+전체 항목 중 몇 개가 적용되었는지 표시합니다. 본문에는 적용 항목별 개선 효과와 검증 근거를,
+되돌림·실패·건너뜀 항목별로는 선택하지 않은 이유(벤치마크 회귀와 롤백 판단 포함)를 기록합니다.
+자동 커밋 시 변경 귀속을 확실히 증명하기 위해 IMPROVE 시작 전 선택된 레포/패키지 범위는 깨끗해야
+합니다. 기존 작업이 있으면 윤회 커밋에 섞지 않고 중단합니다.
 
 ### 패키지별 분할 윤회
 

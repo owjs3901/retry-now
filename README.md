@@ -213,10 +213,18 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | `maxIterations` | hard safety cap on total lives | `50` |
 | `improvementBatchSize` | max plan items per life (`1`..`16`; `1` = classic single change) | `8` |
 | `skipPermissions` | unattended runs: skip the agent's permission prompts | `true` |
-| `commitPerIteration` | git-commit each life's kept changes (`retry-now#NNNN:` prefix) | `true` |
+| `commitPerIteration` | driver commits each life's kept changes with applied/planned counts and per-item evidence (`retry-now#NNNN:` prefix) | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | run test/lint after IMPROVE; revert on failure | `false` / `""` |
 | `benchCommand` + `benchRuns` | before/after benchmark (median of N runs); revert on regression | `""` / `5` |
 | `targets` | package paths for split mode; empty = whole repo | `[]` |
+
+When commits are enabled, the subject reports the retained share, for example
+`retry-now#0026: batch — ... (5/7 applied)`. The commit body lists every applied item with its
+impact and evidence, then every reverted, failed, or skipped item with the reason it was not kept
+(including benchmark regressions and rollback decisions).
+To make attribution provable, the selected repository/package scope must be clean before IMPROVE
+starts when automatic commits are enabled; retry-now stops rather than mixing pre-existing work into
+an iteration commit.
 
 ### Per-package split (분할 윤회)
 

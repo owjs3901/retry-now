@@ -21,8 +21,9 @@ import {
   keptFilesOf,
   normalizeSignal,
   readSignal,
+  validateImproveSignal,
 } from '../signal.ts'
-import type { Current, Signal } from '../types.ts'
+import type { Current, PlannedImprovement, Signal } from '../types.ts'
 
 function improveSignal(overrides: Partial<Signal>): Signal {
   return {
@@ -80,7 +81,7 @@ test('legacy single-change signal: a reverted/failed result maps to 0 kept', () 
   expect(keptCountOf(improveSignal({ result: 'failed' }))).toBe(0)
 })
 
-// --- keptFilesOf: the driver's commit-fallback scope (only KEPT items' files) ---
+// --- keptFilesOf: the driver's exact commit scope (only KEPT items' files) ---
 
 test('keptFilesOf: unions the files of every KEPT item, de-duped', () => {
   const sig = improveSignal({
@@ -196,6 +197,188 @@ test('normalizeSignal drops malformed applied items and non-string file entries'
   expect(sig?.appliedImprovements).toEqual([
     { id: '1', title: 'a', status: 'kept', files: ['x.ts', 'y.ts'] },
   ])
+})
+
+test('normalizeSignal preserves commit-detail fields and the planned count', () => {
+  const sig = normalizeSignal({
+    iteration: 26,
+    phase: 'improve',
+    result: 'applied',
+    report: 'r',
+    plannedCount: 7,
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'faster lookup',
+        status: 'kept',
+        impact: 'reduces median lookup time',
+        decisionReason: 'benchmark improved by 4.2%',
+      },
+      {
+        id: '2',
+        title: 'compact parser',
+        status: 'reverted',
+        impact: 'attempted to reduce allocations',
+        decisionReason: 'edge-case test failed; rolled back',
+      },
+    ],
+    summary: 's',
+    timestamp: 't',
+  })
+
+  expect(sig?.plannedCount).toBe(7)
+  expect(sig?.appliedImprovements?.[0]?.impact).toBe(
+    'reduces median lookup time',
+  )
+  expect(sig?.appliedImprovements?.[1]?.decisionReason).toBe(
+    'edge-case test failed; rolled back',
+  )
+})
+
+test('validateImproveSignal accepts one fully-attributed outcome per planned item', () => {
+  const plan: readonly PlannedImprovement[] = [
+    { id: '1', title: 'keep this' },
+    { id: '2', title: 'try that' },
+  ]
+  const sig = improveSignal({
+    plannedCount: 2,
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'keep this',
+        status: 'kept',
+        impact: 'removes one allocation',
+        decisionReason: 'benchmark improved',
+        files: ['src/keep.ts'],
+      },
+      {
+        id: '2',
+        title: 'try that',
+        status: 'reverted',
+        impact: 'attempted a smaller representation',
+        decisionReason: 'benchmark regressed; rolled back',
+      },
+    ],
+    keptCount: 1,
+    revertedCount: 1,
+    failedCount: 0,
+    skippedCount: 0,
+  })
+
+  expect(validateImproveSignal(sig, plan)).toBeNull()
+})
+
+test('validateImproveSignal rejects missing outcomes, evidence, files, and unsafe paths', () => {
+  const plan: readonly PlannedImprovement[] = [
+    { id: '1', title: 'first' },
+    { id: '2', title: 'second' },
+  ]
+  const base = improveSignal({
+    plannedCount: 2,
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'first',
+        status: 'kept',
+        impact: 'faster',
+        decisionReason: 'benchmark improved',
+        files: ['src/first.ts'],
+      },
+      {
+        id: '2',
+        title: 'second',
+        status: 'skipped',
+        impact: 'would simplify code',
+        decisionReason: 'invalidated by item 1',
+      },
+    ],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 1,
+  })
+  const outcomes = base.appliedImprovements ?? []
+
+  expect(
+    validateImproveSignal(
+      { ...base, appliedImprovements: outcomes.slice(0, 1) },
+      plan,
+    ),
+  ).toContain('one outcome per planned item')
+  expect(
+    validateImproveSignal(
+      {
+        ...base,
+        appliedImprovements: outcomes.map((item) =>
+          item.id === '1' ? { ...item, impact: '' } : item,
+        ),
+      },
+      plan,
+    ),
+  ).toContain('impact')
+  expect(
+    validateImproveSignal(
+      {
+        ...base,
+        appliedImprovements: outcomes.map((item) =>
+          item.id === '1' ? { ...item, files: [] } : item,
+        ),
+      },
+      plan,
+    ),
+  ).toContain('files')
+  expect(
+    validateImproveSignal(
+      {
+        ...base,
+        appliedImprovements: outcomes.map((item) =>
+          item.id === '1' ? { ...item, files: [':(top)**'] } : item,
+        ),
+      },
+      plan,
+    ),
+  ).toContain('unsafe file path')
+})
+
+test('validateImproveSignal rejects mismatched totals, ids, and rolled-up result', () => {
+  const plan: readonly PlannedImprovement[] = [{ id: '1', title: 'first' }]
+  const valid = improveSignal({
+    plannedCount: 1,
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'first',
+        status: 'kept',
+        impact: 'faster',
+        decisionReason: 'benchmark improved',
+        files: ['src/first.ts'],
+      },
+    ],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+  })
+  const outcomes = valid.appliedImprovements ?? []
+
+  expect(validateImproveSignal({ ...valid, plannedCount: 2 }, plan)).toContain(
+    'plannedCount',
+  )
+  expect(
+    validateImproveSignal(
+      {
+        ...valid,
+        appliedImprovements: outcomes.map((item) => ({
+          ...item,
+          id: '9',
+        })),
+      },
+      plan,
+    ),
+  ).toContain('plan id/title')
+  expect(
+    validateImproveSignal({ ...valid, result: 'applied_reverted' }, plan),
+  ).toContain('result')
 })
 
 test('normalizeSignal drops non-numeric / negative counts but keeps valid ones', () => {

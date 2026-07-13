@@ -80,8 +80,8 @@ export interface RetryNowConfig {
   readonly skipPermissions: boolean
   /**
    * Default true. Commit each 윤회's KEPT changes via git so the user can review every
-   * iteration. The agent commits with a `retry-now#<PADDED>:` prefix (multiple commits per
-   * iteration are allowed); reverted/failed iterations are NOT committed.
+   * iteration. After validating the structured IMPROVE signal, the driver creates exactly one
+   * `retry-now#<PADDED>:` commit; reverted/failed iterations are NOT committed.
    */
   readonly commitPerIteration: boolean
   /**
@@ -183,6 +183,10 @@ export interface AppliedImprovement {
   id: string
   title: string
   status: BatchItemStatus
+  /** concrete benefit produced or attempted by this item */
+  impact?: string
+  /** evidence-based reason the item was kept, reverted, failed, or skipped */
+  decisionReason?: string
   /** measured primary metric delta for this item, when one was measured */
   metricDelta?: string
   files?: readonly string[]
@@ -194,9 +198,9 @@ export interface AppliedImprovement {
  * `.retry-now/signal.json`. The driver resets it to `pending` before each run so a
  * crashed/silent agent is detectable.
  *
- * The batch fields are OPTIONAL so the single-change protocol (`nextImprovement` /
- * `metricDelta`) still round-trips unchanged; the driver derives the kept count from
- * `appliedImprovements` when present and otherwise falls back to the legacy `result`.
+ * Batch fields remain OPTIONAL at the parsing/type boundary so historical signals can still be
+ * read. A current IMPROVE run must emit the full structured contract before the driver accepts it;
+ * legacy summary-only signals cannot satisfy detailed commit auditing and are retried/rejected.
  */
 export interface Signal {
   iteration: number
@@ -212,6 +216,8 @@ export interface Signal {
   metricDelta?: string
   /** IMPROVE only: per-item outcome for every planned item the phase acted on */
   appliedImprovements?: readonly AppliedImprovement[]
+  /** IMPROVE only: total items considered in this iteration's batch plan */
+  plannedCount?: number
   /** IMPROVE only: count of items KEPT this batch (the driver's progress signal) */
   keptCount?: number
   /** IMPROVE only: count of items reverted on a regression/check failure */

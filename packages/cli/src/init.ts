@@ -154,7 +154,7 @@ export async function runInit(cwd: string): Promise<number> {
 
   const commitPerIteration = (await p.confirm({
     message:
-      '각 윤회의 변경분을 매번 git commit 할까? (윤회별로 git에서 리뷰 가능; 한 윤회 내 다중 커밋 가능)',
+      '각 윤회의 보존 변경을 상세 git commit으로 남길까? (적용/계획 수, 효과, 검증·제외 사유 포함)',
     initialValue: true,
   })) as boolean | symbol
   if (cancelled(commitPerIteration)) return cancel()
