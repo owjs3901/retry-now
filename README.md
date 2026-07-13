@@ -204,6 +204,8 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | `model` | legacy shared `provider/model` fallback; empty = agent default | `""` |
 | `analysisModel` | model for ANALYZE; empty = `model`, then agent default | `""` |
 | `improveModel` | model for IMPROVE and per-item sub-implementation; empty = `model`, then agent default | `""` |
+| `modelVariant` | shared reasoning tier; opencode `--variant` / Codex `model_reasoning_effort` / Claude Code `--effort`; empty = inferred top tier | `""` |
+| `analysisVariant` / `improveVariant` | per-phase reasoning tiers; empty = `modelVariant`, then inferred top tier | `""` |
 | `agentProfile` | opencode `--agent` profile; empty = default | `""` |
 | `analysis` / `direction` / `completion` | the three intent prompts above | — (required) |
 | `threshold` | consecutive `no_improvements` lives until convergence | `5` |

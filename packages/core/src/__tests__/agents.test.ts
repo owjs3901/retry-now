@@ -123,20 +123,44 @@ test('the shared modelVariant overrides the auto top tier when no per-phase vari
   expect(variantOf(improve.args)).toBe('medium')
 })
 
-test('non-opencode agents never receive --variant even though a top tier is always resolvable', () => {
-  const codex = buildAgentCommand(
-    cfg({ agent: 'codex', improveModel: 'openai/gpt-5.6-sol' }),
-    'improve',
-    'improve',
-  )
+test('claude never receives --variant even though a top tier is always resolvable', () => {
   const claude = buildAgentCommand(
     cfg({ agent: 'claude', analysisModel: 'anthropic/claude-opus-4-8' }),
     'analyze',
     'analyze',
   )
 
-  expect(codex.args).not.toContain('--variant')
   expect(claude.args).not.toContain('--variant')
+})
+
+test('claude translates the configured phase variant to effort', () => {
+  const command = buildAgentCommand(
+    cfg({
+      agent: 'claude',
+      analysisModel: 'anthropic/claude-opus-4-8',
+      analysisVariant: 'high',
+    }),
+    'analyze',
+    'analyze',
+  )
+
+  expect(command.args).toContain('--effort')
+  expect(command.args).toContain('high')
+})
+
+test('codex translates the configured phase variant to model_reasoning_effort', () => {
+  const command = buildAgentCommand(
+    cfg({
+      agent: 'codex',
+      analysisModel: 'openai/gpt-5.6-sol',
+      analysisVariant: 'high',
+    }),
+    'analyze',
+    'analyze',
+  )
+
+  expect(command.args).toContain('--config')
+  expect(command.args).toContain('model_reasoning_effort="high"')
 })
 
 test('command uses phase-specific model over shared legacy model', () => {
@@ -177,6 +201,8 @@ test('codex command covers unattended and sandboxed modes', () => {
       '--skip-git-repo-check',
       '--model',
       'openai/implementer',
+      '--config',
+      'model_reasoning_effort="xhigh"',
       'improve',
     ],
   })
@@ -187,6 +213,8 @@ test('codex command covers unattended and sandboxed modes', () => {
       '--sandbox',
       'workspace-write',
       '--skip-git-repo-check',
+      '--config',
+      'model_reasoning_effort="max"',
       'analyze',
     ],
   })
@@ -215,6 +243,8 @@ test('claude command uses bare fresh session flags and optional model/permission
       '--no-session-persistence',
       '--model',
       'claude/analyzer',
+      '--effort',
+      'max',
       '--dangerously-skip-permissions',
     ],
   })
@@ -225,6 +255,8 @@ test('claude command uses bare fresh session flags and optional model/permission
     '--output-format',
     'text',
     '--no-session-persistence',
+    '--effort',
+    'max',
   ])
 })
 

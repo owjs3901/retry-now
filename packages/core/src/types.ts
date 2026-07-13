@@ -31,16 +31,18 @@ export interface RetryNowConfig {
   /** optional IMPROVE/sub-implementation model id; empty = `model` fallback, then agent default */
   readonly improveModel: string
   /**
-   * optional provider-specific model variant (opencode `--variant`); empty = default.
+   * optional provider-specific model variant (opencode `--variant`, Codex
+   * `model_reasoning_effort`, or Claude Code `--effort`); empty = highest tier inferred from the
+   * selected model.
    * Shared FALLBACK for the two per-phase variants below (mirrors how `model` backs
    * `analysisModel`/`improveModel`). Set the per-phase ones when ANALYZE and IMPROVE use
    * different providers whose top tiers differ (e.g. Anthropic `max` vs OpenAI `xhigh`),
    * since a single `--variant` cannot be correct for both at once.
    */
   readonly modelVariant: string
-  /** optional ANALYZE-phase model variant; empty = `modelVariant` fallback, then default */
+  /** optional ANALYZE-phase model variant; empty = `modelVariant`, then inferred top tier */
   readonly analysisVariant: string
-  /** optional IMPROVE-phase model variant; empty = `modelVariant` fallback, then default */
+  /** optional IMPROVE-phase model variant; empty = `modelVariant`, then inferred top tier */
   readonly improveVariant: string
   /** optional agent profile name (opencode `--agent`); empty = default */
   readonly agentProfile: string
