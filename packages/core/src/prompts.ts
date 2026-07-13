@@ -46,9 +46,10 @@ function signalShapeImprove(stateDir: string): string {
   "phase": "improve",
   "result": "applied" | "applied_reverted" | "failed",
   "report": "${stateDir}/reports/<PADDED>-improve.md",
+  "plannedCount": <total number of items in this iteration's batch plan>,
   "appliedImprovements": [
-    { "id": "1", "title": "<item 1 title>", "status": "kept", "files": ["path/a.ts"] },
-    { "id": "2", "title": "<item 2 title>", "status": "reverted", "summary": "why it was rolled back" }
+    { "id": "1", "title": "<item 1 title>", "status": "kept", "impact": "what improved and why it matters", "decisionReason": "evidence for keeping it", "metricDelta": "measured delta or none", "files": ["path/a.ts"] },
+    { "id": "2", "title": "<item 2 title>", "status": "reverted", "impact": "what it attempted to improve", "decisionReason": "benchmark regression and rollback reason", "metricDelta": "+3.1% median runtime", "files": [] }
   ],
   "keptCount": <number kept>,
   "revertedCount": <number reverted>,
@@ -234,33 +235,17 @@ export function buildImprovePrompt(
     ? `
 ---
 
-## 4b. Commit this batch's KEPT changes (git — ENABLED)
+## 4b. Leave KEPT changes for the driver commit (git — ENABLED)
 
-Per-iteration git commits are ON. After the decision gate, ONLY if at least one item was KEPT
-(\`keptCount >= 1\`):
-
-- Make ONE commit for the whole iteration containing EVERY kept item's files, with a message
-  PREFIXED by \`retry-now#<PADDED>: \` (PADDED from \`current.json\`) that summarises the kept items,
-  e.g. \`retry-now#0012: batch — cache regex, dedupe path helper, drop dead export (3 kept)\`. This
-  prefix lets the user identify which iteration each commit belongs to. Per-item attribution lives in
-  the report and ledger, so a single larger commit per iteration is intended here.
-- Commit ONLY files you modified for KEPT items. Do NOT commit files you reverted, and do NOT
-  \`git add\` the \`${DIR}/\` directory (it is gitignored) or unrelated pre-existing working-tree
-  changes.
-- This loop runs UNATTENDED — no human is present to enter a commit-signing passphrase. If the commit
-  fails or stalls because of commit signing (\`commit.gpgsign\`, GPG or SSH signing — e.g.
-  \`gpg failed to sign the data\`, \`No secret key\`, or a pinentry/passphrase prompt), retry the
-  SAME commit once with \`--no-gpg-sign\` (e.g. \`git commit --no-gpg-sign -m "retry-now#<PADDED>: …"\`)
-  so signing can never block the iteration. Landing the change matters more than the signature here.
-- CRITICAL — a commit or signing failure is NOT a verification failure and is NEVER grounds to revert
-  or fail an item. The keep/revert decision in §4 is FINAL and was made BEFORE this commit; a
-  signature or commit problem happens AFTER it and cannot change it. If \`git commit\` fails for ANY
-  reason (signing, hooks, anything), your ONLY response is to make the SAME commit land — first with
-  \`--no-gpg-sign\`, and if even that fails, LEAVE the kept changes staged in the working tree (the
-  driver commits them). NEVER restore a kept item from its backup, re-run verification, downgrade it
-  to \`reverted\`/\`failed\`, or turn the batch \`result\` into \`applied_reverted\`/\`failed\` because a
-  commit did not go through. Kept stays kept.
-- If NOTHING was kept (\`keptCount = 0\`), do NOT commit.
+Per-iteration git commits are ON, but the driver creates the iteration commit AFTER reading your
+structured signal. Do NOT run \`git commit\` and do not stage unrelated files. Leave only KEPT item
+changes in the working tree; the driver stages exactly their reported \`files\` and creates one commit
+whose subject reports \`<applied>/<planned>\` and whose body records every item's impact, measurement,
+and keep/revert/fail/skip reason. This makes rejected changes and benchmark-driven rollbacks visible
+in \`git log\` instead of only in the private report.
+For the later driver step, a commit or signing failure is NOT a verification failure and cannot
+change an item's final status. NEVER revert a kept change merely because its commit could not be signed.
+Kept stays kept.
 `
     : `
 ---
@@ -371,6 +356,8 @@ Work the plan items in order. For EACH item \`<id>\`:
 - Back up first: COPY every file that item will modify into \`${stateDir}/backups/<PADDED>/item-<id>/\`,
   preserving relative paths. These per-item backups are your ONLY revert source — the loop
   deliberately does NOT use git for revert, so it never disturbs unrelated working-tree changes.
+- Before editing, inspect \`git status\`. Do not modify a file that was already dirty before this
+  IMPROVE phase; attribution would be ambiguous and the driver will refuse to auto-commit it.
 - Implement EXACTLY that one item from the analyze spec, preferably by delegating to exactly one
   fresh sub-implementation agent for that item and waiting for it before continuing. Smallest
   correct change. No suppressed warnings, no type-escape casts, no unjustified unsafe operations.
@@ -435,18 +422,16 @@ Make each kept item independently reviewable.
 
 ---
 
-## 6b. Leave the working tree CLEAN (terminal obligation)
+## 6b. Leave only attributable working-tree changes (terminal obligation)
 
 Before you emit the signal, the working tree MUST hold nothing you left half-done: every KEPT item
-is handled per §4b (committed when commits are on — or, if a signing failure blocked even the
-\`--no-gpg-sign\` retry, left cleanly STAGED for the driver to commit — otherwise, with commits off,
-left for the user), and every reverted/failed/skipped item's files are FULLY restored from their
+is left intact for the driver when commits are on (or for the user when commits are off), and every
+reverted/failed/skipped item's files are FULLY restored from their
 \`${stateDir}/backups/<PADDED>/item-<id>/\` backup. Run \`git status\` and confirm the ONLY changes
 present are your kept edits — no stray modification you introduced and did not either keep or
-revert. A life ends EITHER "improved ⇒ kept (committed, or staged when signing blocked the commit)"
-OR "nothing kept ⇒ everything you touched reverted"; NEVER a dirty tree of unexplained edits, and
-NEVER revert a kept change merely because its commit could not be signed. Restore your own stray
-edits before signalling.
+revert. A life ends EITHER "improved ⇒ kept for the driver" OR "nothing kept ⇒ everything you
+touched reverted"; NEVER a dirty tree of unexplained edits. Restore your own stray edits before
+signalling.
 
 ---
 
@@ -461,6 +446,16 @@ ${signalShapeImprove(stateDir)}
 - \`result\` is one of \`"applied"\` | \`"applied_reverted"\` | \`"failed"\`, rolled up per section 4.
 - \`appliedImprovements\` has ONE entry per plan item you acted on, each with its \`id\` (matching the
   analyze plan), \`title\`, and final \`status\` (\`kept\`/\`reverted\`/\`failed\`/\`skipped\`).
+- \`plannedCount\` is the total number of plan items considered this iteration and MUST equal the
+  number of entries in \`appliedImprovements\`. Include skipped items; omit no decision.
+- EVERY item MUST include a concrete \`impact\` and an evidence-based \`decisionReason\`. For kept
+  items, explain what improved and why the evidence justified keeping it. For non-kept items, explain
+  why it was not selected; include the benchmark regression and rollback reason when applicable.
+  Keep these fields concise and never include credentials, tokens, secrets, source excerpts, or
+  private customer data because they become part of permanent Git history.
+- EVERY kept item MUST include all and only its changed regular files in \`files\`, as exact
+  repository-relative paths using forward slashes. Never report a directory, absolute path, \`..\`,
+  glob, or Git magic pathspec. The driver rejects unsafe, pre-existing-dirty, or out-of-scope paths.
 - \`keptCount\`/\`revertedCount\`/\`failedCount\`/\`skippedCount\` MUST match \`appliedImprovements\`.
 - \`metricDelta\` is the benchmark item's measured delta, or a short batch note, or \`"none"\`.
 - \`iteration\` MUST equal \`current.json\`.

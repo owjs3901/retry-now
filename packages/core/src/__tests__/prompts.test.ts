@@ -189,15 +189,18 @@ test('prompts expose separate analyze/improve models and forbid parallel impleme
   )
 })
 
-test('improve prompt makes leaving a CLEAN working tree a terminal obligation before the signal', () => {
+test('improve prompt requires only attributable working-tree changes before the signal', () => {
   const out = buildImprovePrompt(cfg())
-  expect(out).toContain('Leave the working tree CLEAN (terminal obligation)')
+  expect(out).toContain(
+    'Leave only attributable working-tree changes (terminal obligation)',
+  )
+  expect(out).toContain('is left intact for the driver')
   expect(out).toContain('NEVER a dirty tree of unexplained edits')
 })
 
 test('the clean-tree terminal obligation is improve-only (analyze never carries it)', () => {
   expect(buildAnalyzePrompt(cfg())).not.toContain(
-    'Leave the working tree CLEAN',
+    'Leave only attributable working-tree changes',
   )
 })
 
@@ -210,4 +213,19 @@ test('improve prompt forbids reverting a kept item over a commit/signing failure
   expect(out).toContain(
     'NEVER revert a kept change merely because its commit could not be signed',
   )
+})
+
+test('improve prompt delegates commits to the driver and requires detailed per-item evidence', () => {
+  const out = buildImprovePrompt(cfg())
+
+  expect(out).toContain('Do NOT run `git commit`')
+  expect(out).toContain('the driver creates the iteration commit')
+  expect(out).toContain('`plannedCount`')
+  expect(out).toContain('`impact`')
+  expect(out).toContain('`decisionReason`')
+  expect(out).toContain('benchmark regression and rollback reason')
+  expect(out).toContain(
+    'EVERY kept item MUST include all and only its changed regular files',
+  )
+  expect(out).toContain('pre-existing-dirty')
 })

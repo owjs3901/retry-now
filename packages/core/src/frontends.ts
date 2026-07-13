@@ -57,6 +57,17 @@ export function buildFrontendBody(
   const runHow = RUN_HOW[agent]
   const runLine =
     agent === 'codex' ? driverCommand : `${driverCommand} $ARGUMENTS`
+  const variantSetting =
+    agent === 'codex'
+      ? 'Codex this is passed as `model_reasoning_effort`'
+      : agent === 'claude'
+        ? 'Claude Code this is passed as `--effort`'
+        : 'opencode this is passed as `--variant`'
+  const variantQuestion = `
+10. **Variant (추론 강도).** Which reasoning tier should every life use? For ${variantSetting}.
+    Empty means retry-now infers the highest tier for the selected model (for example \`xhigh\` or \`max\`).`
+  const modelVariantValue =
+    '"<answer 10 variant, or empty string for the inferred top tier>"'
   return `retry-now (지금 바로 윤회) — CONFIGURE (if needed) then RUN the autonomous improvement loop
 for THIS project. Talk to the user in their language.
 
@@ -105,7 +116,7 @@ follow-up only when a bench command exists.
    models ship constantly, so ASK the user instead of assuming any specific one — and CENTER the
    choices on the LATEST models: ${MODEL_DISCOVERY[agent]}, then offer the few newest/strongest
    coding models as the options, newest first, with the strongest recommended as the default
-   answer. Empty means the agent's own default model.
+   answer. Empty means the agent's own default model.${variantQuestion}
 
 The loop ALWAYS also hunts and removes **duplicate code** and **dead/unused code** every iteration,
 regardless of the analysis answer — that is baked into the generated prompts, so you need not ask.
@@ -120,6 +131,7 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
   "version": 1,
   "agent": "${agent}",
   "model": "<answer 9 provider/model id, or empty string for the agent default>",
+  "modelVariant": ${modelVariantValue},
   "agentProfile": "",
   "analysis": "<answer 2>",
   "direction": "<answer 3>",
@@ -142,7 +154,7 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
 Write ONLY \`.retry-now/config.json\` — the loop regenerates everything else (prompts, .gitignore,
 README) from it on the first run. Then read the config back to the user and confirm.
 
-### If it EXISTS — summarise it (agent, model, threshold, revert-threshold, targets, verify/bench) and ASK whether to
+### If it EXISTS — summarise it (agent, model, variant, threshold, revert-threshold, targets, verify/bench) and ASK whether to
 proceed as-is or reconfigure. If they reconfigure, re-run the interview above and overwrite the file.
 
 ## STEP 2 — run the loop

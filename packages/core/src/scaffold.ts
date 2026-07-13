@@ -70,7 +70,7 @@ This amortizes one analysis across the batch while keeping each item benchmarkab
 
 The loop converges after \`${config.threshold}\` consecutive \`no_improvements\` ANALYZE runs, or \`${config.revertThreshold}\` consecutive IMPROVE runs that keep zero items. Safety cap: \`maxIterations = ${config.maxIterations}\`.
 
-git commits: ${config.commitPerIteration ? '**on** — one `retry-now#NNNN:` commit per iteration containing all kept items; item attribution lives in reports/ledger.' : '**off** — leave kept changes in the working tree.'}
+git commits: ${config.commitPerIteration ? '**on** — the driver creates one `retry-now#NNNN:` commit per iteration with `<applied>/<planned>` in the subject and per-item impact/evidence/rejection reasons in the body.' : '**off** — leave kept changes in the working tree.'}
 
 step1 ANALYZE is strictly read-only. step3 verification: ${verifyDesc}.
 Benchmark: ${benchDesc}. A final \`summary.md\` is generated when the loop stops.

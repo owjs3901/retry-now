@@ -21,10 +21,14 @@ import { AGENT_LABEL, buildAgentCommand, modelForPhase } from './agents.ts'
 import { loadConfig } from './config.ts'
 import {
   commitPaths,
+  formatIterationCommitMessage,
   type GitRunner,
+  headRevision,
   isGitRepo,
   runGit,
+  statusPaths,
   statusPorcelain,
+  validateCommitFileAttribution,
 } from './git.ts'
 import {
   appendLine,
@@ -39,24 +43,25 @@ import { acquireDriverLock, releaseDriverLock } from './lock.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 import { quotaExhaustedInLog } from './quota.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
-import { beginPhase, keptCountOf, keptFilesOf, readSignal } from './signal.ts'
+import {
+  beginPhase,
+  keptCountOf,
+  keptFilesOf,
+  readSignal,
+  validateImproveSignal,
+} from './signal.ts'
 import {
   loadState,
   recordImproveOutcome,
   recordNoImprovement,
   saveState,
 } from './state.ts'
-import {
-  BANNER,
-  commitPrefix,
-  converged,
-  rebirth,
-  revertConverged,
-} from './theme.ts'
+import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
 import type {
   DriverOptions,
   LoopState,
   Phase,
+  PlannedImprovement,
   RetryNowConfig,
   Signal,
 } from './types.ts'
@@ -134,8 +139,16 @@ function synthSignal(iter: number, phase: Phase): Signal {
     result: 'applied',
     report: '(dry-run)',
     appliedImprovements: [
-      { id: '1', title: '(dry-run improvement)', status: 'kept' },
+      {
+        id: '1',
+        title: '(dry-run improvement)',
+        status: 'kept',
+        impact: '(dry-run impact)',
+        decisionReason: '(dry-run verification passed)',
+        files: ['(dry-run-file)'],
+      },
     ],
+    plannedCount: 1,
     keptCount: 1,
     revertedCount: 0,
     failedCount: 0,
@@ -285,6 +298,8 @@ async function runPhaseResilient(
   log: (line: string) => void,
   stateDirRel: string,
   scope: string,
+  validate?: (signal: Signal) => string | null,
+  retryGuard?: () => Promise<string | null>,
 ): Promise<PhaseOutcome> {
   const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
   const waitDeadline = Date.now() + config.maxQuotaWaitMs
@@ -301,7 +316,13 @@ async function runPhaseResilient(
       stateDirRel,
       scope,
     )
-    if (sig) return { kind: 'ok', signal: sig }
+    if (sig) {
+      const issue = validate?.(sig) ?? null
+      if (issue === null) return { kind: 'ok', signal: sig }
+      log(
+        `  ! ${phase}: invalid structured signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — ${issue}`,
+      )
+    }
 
     // A no-signal run looks like a crash by exit code, but an out-of-quota wall needs the
     // opposite handling. Check the agent's own log for a rate-limit / quota error shape.
@@ -317,12 +338,22 @@ async function runPhaseResilient(
       log(
         `  ⏳ ${phase}: 모든 계정 쿼터 소진 — ${fmtDuration(config.quotaPollMs)} 대기 후 재시도(쿼터 충전 대기)…`,
       )
+      const retryIssue = (await retryGuard?.()) ?? null
+      if (retryIssue !== null) {
+        log(`  ! ${phase}: refusing unsafe retry — ${retryIssue}`)
+        return { kind: 'failed' }
+      }
       await delay(config.quotaPollMs)
       attempt-- // a quota wait is not a crash attempt — retry this life without spending budget
       continue
     }
 
     if (attempt < PHASE_ATTEMPTS) {
+      const retryIssue = (await retryGuard?.()) ?? null
+      if (retryIssue !== null) {
+        log(`  ! ${phase}: refusing unsafe retry — ${retryIssue}`)
+        return { kind: 'failed' }
+      }
       log(
         `  ! ${phase}: no valid signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — the agent may have crashed. Retrying in a fresh session…`,
       )
@@ -354,7 +385,9 @@ async function appendHistory(
       ...(sig.metricDelta ? { metricDelta: sig.metricDelta } : {}),
       ...(sig.plannedImprovements
         ? { plannedCount: sig.plannedImprovements.length }
-        : {}),
+        : typeof sig.plannedCount === 'number'
+          ? { plannedCount: sig.plannedCount }
+          : {}),
       ...(typeof sig.keptCount === 'number'
         ? { keptCount: sig.keptCount }
         : {}),
@@ -573,18 +606,18 @@ export interface DriverResult {
 }
 
 /**
- * COMMIT-FALLBACK. When commits are on and a batch KEPT ≥1 item but the agent left those kept
- * files uncommitted (it forgot, ran out of budget, or its own commit failed), the driver commits
- * EXACTLY the kept files itself — so the "improved ⇒ committed" half of the clean-tree invariant
- * holds even when the agent slips. It stages ONLY the files the signal names as kept (never a
- * blanket `git add -A`), so unrelated working-tree changes are never swept in, and it is
- * best-effort: any git failure is logged, never fatal (the loop must not wedge while unattended).
+ * Commit one completed batch from its structured signal. The driver owns commit creation so every
+ * normal and signing-retry path uses the same applied/planned count and per-item evidence. It stages
+ * ONLY files the signal names as kept (never a blanket `git add -A`), so unrelated changes are not
+ * swept in. Git failure is best-effort and never fatal; the loop must not wedge while unattended.
  */
 async function reconcileKeptCommit(
   paths: Paths,
   config: RetryNowConfig,
   iter: number,
   sig: Signal,
+  baselineDirty: readonly string[] | null,
+  scope: string,
   log: (line: string) => void,
   git: GitRunner = runGit,
 ): Promise<void> {
@@ -594,17 +627,36 @@ async function reconcileKeptCommit(
   // No attributable files → committing safely is impossible; the end-of-loop check will surface it.
   if (files.length === 0) return
   if (!(await isGitRepo(paths.root, git))) return
+  if (baselineDirty === null) {
+    log('  ! commit: could not establish the pre-IMPROVE dirty-file baseline.')
+    return
+  }
+  const currentDirty = await statusPaths(paths.root, scope ? [scope] : [], git)
+  if (currentDirty === null) {
+    log('  ! commit: could not establish exact changed-file attribution.')
+    return
+  }
+  const attributionIssue = validateCommitFileAttribution(
+    files,
+    baselineDirty,
+    currentDirty,
+    scope,
+  )
+  if (attributionIssue !== null) {
+    log(`  ! commit: unsafe attribution — ${attributionIssue}`)
+    return
+  }
   const dirty = await statusPorcelain(paths.root, files, git)
-  if (dirty.length === 0) return // agent already committed its kept files — nothing to do
-  const message = `${commitPrefix(pad(iter))}commit-fallback — ${keptCountOf(sig)} kept item(s) left uncommitted by the agent`
+  if (dirty.length === 0) return
+  const message = formatIterationCommitMessage(pad(iter), sig)
   const res = await commitPaths(paths.root, files, message, git)
   if (res.code === 0) {
     log(
-      `  ✓ commit-fallback: committed ${files.length} kept file(s) the agent had left uncommitted.`,
+      `  ✓ commit: recorded ${keptCountOf(sig)}/${sig.plannedCount ?? sig.appliedImprovements?.length ?? keptCountOf(sig)} applied item(s) across ${files.length} file(s).`,
     )
   } else {
     log(
-      `  ! commit-fallback: could not commit kept files (git exit ${res.code}) — left in the working tree for review.`,
+      `  ! commit: could not record kept files (git exit ${res.code}) — left in the working tree for review.`,
     )
   }
 }
@@ -724,6 +776,44 @@ async function runOneLoop(
       `[${label}][${iter}] analyze: 개선 발견 (${plannedCount}개 계획) → '${analyzeSig.nextImprovement}'. streak 리셋.`,
     )
 
+    const planned: readonly PlannedImprovement[] =
+      analyzeSig.plannedImprovements ?? [
+        {
+          id: '1',
+          title: analyzeSig.nextImprovement ?? '(legacy improvement)',
+        },
+      ]
+    const baselineDirty = opts.dryRun
+      ? []
+      : await statusPaths(paths.root, scope ? [scope] : [])
+    const baselineHead = opts.dryRun
+      ? '(dry-run)'
+      : await headRevision(paths.root)
+    if (!opts.dryRun && baselineDirty === null) {
+      state.status = 'error'
+      log(
+        `[${label}][${iter}] improve 시작 전 Git 상태를 읽지 못해 안전한 귀속을 보장할 수 없습니다.`,
+      )
+      break
+    }
+    if (!opts.dryRun && baselineHead === null) {
+      state.status = 'error'
+      log(
+        `[${label}][${iter}] improve 시작 전 Git HEAD를 읽지 못해 안전한 귀속을 보장할 수 없습니다.`,
+      )
+      break
+    }
+    if (
+      !opts.dryRun &&
+      config.commitPerIteration &&
+      (baselineDirty?.length ?? 0) > 0
+    ) {
+      state.status = 'error'
+      log(
+        `[${label}][${iter}] 자동 커밋 모드는 IMPROVE 시작 전 깨끗한 대상 워킹트리가 필요합니다. 기존 변경을 먼저 커밋하거나 보관하세요.`,
+      )
+      break
+    }
     const b = await runPhaseResilient(
       paths,
       config,
@@ -733,12 +823,35 @@ async function runOneLoop(
       log,
       stateDirRel,
       scope,
+      (signal) => validateImproveSignal(signal, planned),
+      async () => {
+        if (baselineDirty === null) {
+          return 'pre-IMPROVE dirty-file baseline is unavailable'
+        }
+        if (baselineDirty.length > 0) {
+          return 'pre-existing dirty files make an IMPROVE retry ambiguous'
+        }
+        const currentHead = await headRevision(paths.root)
+        if (currentHead !== baselineHead) {
+          return 'Git HEAD changed during the IMPROVE attempt'
+        }
+        const current = await statusPaths(paths.root, scope ? [scope] : [])
+        if (current === null) return 'current dirty-file status is unavailable'
+        return validateCommitFileAttribution([], baselineDirty, current, scope)
+      },
     )
     if (b.kind !== 'ok') {
       handlePhaseStop(state, b.kind, label, iter, 'improve', config, paths, log)
       break
     }
     const improveSig = b.signal
+    if (!opts.dryRun && (await headRevision(paths.root)) !== baselineHead) {
+      state.status = 'error'
+      log(
+        `[${label}][${iter}] IMPROVE 중 Git HEAD가 변경되었습니다. 에이전트 커밋은 허용되지 않으며 드라이버 상세 커밋을 만들 수 없습니다.`,
+      )
+      break
+    }
     await appendHistory(paths, config, iter, 'improve', improveSig)
     const kept = keptCountOf(improveSig)
     log(
@@ -751,10 +864,17 @@ async function runOneLoop(
         `[${label}][${iter}] 보존된 변경 없음(${improveSig.result}) → 윤회 전체 리버트. 리버트 streak = ${state.revertStreak}/${config.revertThreshold}`,
       )
     }
-    // Safety net: if the agent kept items but left them uncommitted, commit exactly those files so
-    // this life ends with its improvement recorded, not dangling in the working tree.
+    // Commit only after the structured signal exists, so the message can explain every decision.
     if (!opts.dryRun) {
-      await reconcileKeptCommit(paths, config, iter, improveSig, log)
+      await reconcileKeptCommit(
+        paths,
+        config,
+        iter,
+        improveSig,
+        baselineDirty,
+        scope,
+        log,
+      )
     }
     state.iteration = iter
     await saveState(paths, state)

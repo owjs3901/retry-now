@@ -69,20 +69,20 @@ export async function runInit(cwd: string): Promise<number> {
   })) as string | symbol
   if (cancelled(analysisModel)) return cancel()
 
-  // `--variant` is opencode-only (codex/claude ignore it) and per-phase, so a provider-split loop
-  // can give ANALYZE and IMPROVE different top tiers (e.g. Anthropic `max` vs OpenAI `xhigh`) —
-  // a single shared variant cannot be correct for both at once.
-  let analysisVariant = ''
-  if (agent === 'opencode') {
-    const analysisVariantRaw = (await p.text({
-      message:
-        '분석 모델 variant (opencode --variant). 비워두면 기본값 — 예: Anthropic=max, OpenAI=xhigh.',
-      placeholder: 'max / xhigh',
-      defaultValue: '',
-    })) as string | symbol
-    if (cancelled(analysisVariantRaw)) return cancel()
-    analysisVariant = analysisVariantRaw
-  }
+  // Variants are per-phase, so a provider-split loop can give ANALYZE and IMPROVE different top
+  // tiers. Each adapter maps this value to its own CLI setting.
+  const variantSetting =
+    agent === 'codex'
+      ? 'Codex model_reasoning_effort'
+      : agent === 'claude'
+        ? 'Claude Code --effort'
+        : 'opencode --variant'
+  const analysisVariant = (await p.text({
+    message: `분석 모델 variant (${variantSetting}). 비워두면 최고 등급 자동 — 예: max / xhigh.`,
+    placeholder: 'max / xhigh',
+    defaultValue: '',
+  })) as string | symbol
+  if (cancelled(analysisVariant)) return cancel()
 
   const improveModel = (await p.text({
     message:
@@ -92,17 +92,12 @@ export async function runInit(cwd: string): Promise<number> {
   })) as string | symbol
   if (cancelled(improveModel)) return cancel()
 
-  let improveVariant = ''
-  if (agent === 'opencode') {
-    const improveVariantRaw = (await p.text({
-      message:
-        '구현 모델 variant (opencode --variant). 비워두면 기본값 — 예: Anthropic=max, OpenAI=xhigh.',
-      placeholder: 'max / xhigh',
-      defaultValue: '',
-    })) as string | symbol
-    if (cancelled(improveVariantRaw)) return cancel()
-    improveVariant = improveVariantRaw
-  }
+  const improveVariant = (await p.text({
+    message: `구현 모델 variant (${variantSetting}). 비워두면 최고 등급 자동 — 예: max / xhigh.`,
+    placeholder: 'max / xhigh',
+    defaultValue: '',
+  })) as string | symbol
+  if (cancelled(improveVariant)) return cancel()
 
   const analysis = (await p.text({
     message: '1. 분석 및 계획 — 무엇을 분석/계획할지',
@@ -159,7 +154,7 @@ export async function runInit(cwd: string): Promise<number> {
 
   const commitPerIteration = (await p.confirm({
     message:
-      '각 윤회의 변경분을 매번 git commit 할까? (윤회별로 git에서 리뷰 가능; 한 윤회 내 다중 커밋 가능)',
+      '각 윤회의 보존 변경을 상세 git commit으로 남길까? (적용/계획 수, 효과, 검증·제외 사유 포함)',
     initialValue: true,
   })) as boolean | symbol
   if (cancelled(commitPerIteration)) return cancel()
@@ -325,11 +320,7 @@ export async function runInit(cwd: string): Promise<number> {
         ? `윤회 모드: 패키지별 분할 (${config.targets.length}개 타겟, 각자 독립 수렴)`
         : `윤회 모드: 전체 레포 단일 윤회`,
       `모델: 분석=${config.analysisModel || 'agent default'} / 구현=${config.improveModel || 'agent default'}`,
-      ...(config.agent === 'opencode'
-        ? [
-            `variant: 분석=${variantForPhase(config, 'analyze')} / 구현=${variantForPhase(config, 'improve')} (미설정 시 최고 등급 자동)`,
-          ]
-        : []),
+      `variant: 분석=${variantForPhase(config, 'analyze')} / 구현=${variantForPhase(config, 'improve')} (미설정 시 최고 등급 자동)`,
       `수렴: ${config.threshold}생 연속 개선없음 또는 ${config.revertThreshold}생 연속 전체 리버트`,
       config.benchCommand
         ? `벤치마크: ${config.benchCommand} (before/after ${config.benchRuns}회 중앙값, 회귀 시 리버트)`

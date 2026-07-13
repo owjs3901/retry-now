@@ -10,13 +10,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-function readVersion(): string {
+export function readVersionFrom(pkgPath: string): string {
   try {
-    const pkgPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      '..',
-      'package.json',
-    )
     const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
       version?: unknown
     }
@@ -24,6 +19,12 @@ function readVersion(): string {
   } catch {
     return '0.0.0'
   }
+}
+
+function readVersion(): string {
+  return readVersionFrom(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'),
+  )
 }
 
 /** The retry-now version, sourced from `@retry-now/core`'s `package.json`. */

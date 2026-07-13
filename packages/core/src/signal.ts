@@ -8,6 +8,7 @@
 import { nowIso, readJson, writeJson } from './io.ts'
 import type { Paths } from './paths.ts'
 import { pad } from './paths.ts'
+import { hasUnsafeTextCharacter } from './safe-text.ts'
 import type {
   AppliedImprovement,
   BatchItemStatus,
@@ -16,6 +17,8 @@ import type {
   PlannedImprovement,
   Signal,
 } from './types.ts'
+
+export { validateImproveSignal } from './improve-signal.ts'
 
 /** Reset the signal to `pending` and publish the per-reincarnation hint. */
 export async function beginPhase(
@@ -86,11 +89,13 @@ function optCount(v: unknown): number | undefined {
 function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
   if (!Array.isArray(v)) return undefined
   const out: PlannedImprovement[] = []
-  for (const item of v) {
+  for (const item of v.slice(0, 16)) {
     if (!isRecord(item)) continue
     const id = optStr(item.id)
     const title = optStr(item.title)
     if (id === undefined || title === undefined) continue
+    if (!/^\d{1,4}$/.test(id) || title === '' || title.length > 200) continue
+    if (hasUnsafeTextCharacter(title)) continue
     out.push(isRisk(item.risk) ? { id, title, risk: item.risk } : { id, title })
   }
   return out
@@ -100,22 +105,34 @@ function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
 function cleanApplied(v: unknown): AppliedImprovement[] | undefined {
   if (!Array.isArray(v)) return undefined
   const out: AppliedImprovement[] = []
-  for (const item of v) {
+  for (const item of v.slice(0, 16)) {
     if (!isRecord(item)) continue
     const id = optStr(item.id)
     const title = optStr(item.title)
     if (id === undefined || title === undefined) continue
+    if (!/^\d{1,4}$/.test(id) || title === '' || title.length > 200) continue
+    if (hasUnsafeTextCharacter(title)) continue
     if (!isStatus(item.status)) continue
+    const impact = optStr(item.impact)
+    const decisionReason = optStr(item.decisionReason)
     const metricDelta = optStr(item.metricDelta)
     const summary = optStr(item.summary)
     const files = Array.isArray(item.files)
-      ? item.files.filter((f): f is string => typeof f === 'string')
+      ? item.files
+          .filter((f): f is string => typeof f === 'string')
+          .map((file) => file.replace(/\\/g, '/'))
       : undefined
     out.push({
       id,
       title,
       status: item.status,
-      ...(metricDelta !== undefined ? { metricDelta } : {}),
+      ...(impact !== undefined && impact.length <= 1000 ? { impact } : {}),
+      ...(decisionReason !== undefined && decisionReason.length <= 1000
+        ? { decisionReason }
+        : {}),
+      ...(metricDelta !== undefined && metricDelta.length <= 500
+        ? { metricDelta }
+        : {}),
       ...(files ? { files } : {}),
       ...(summary !== undefined ? { summary } : {}),
     })
@@ -146,6 +163,7 @@ export function normalizeSignal(raw: unknown): Signal | null {
   const planned = cleanPlanned(raw.plannedImprovements)
   const metricDelta = optStr(raw.metricDelta)
   const applied = cleanApplied(raw.appliedImprovements)
+  const plannedCount = optCount(raw.plannedCount)
   const keptCount = optCount(raw.keptCount)
   const revertedCount = optCount(raw.revertedCount)
   const failedCount = optCount(raw.failedCount)
@@ -162,6 +180,7 @@ export function normalizeSignal(raw: unknown): Signal | null {
     ...(planned ? { plannedImprovements: planned } : {}),
     ...(metricDelta !== undefined ? { metricDelta } : {}),
     ...(applied ? { appliedImprovements: applied } : {}),
+    ...(plannedCount !== undefined ? { plannedCount } : {}),
     ...(keptCount !== undefined ? { keptCount } : {}),
     ...(revertedCount !== undefined ? { revertedCount } : {}),
     ...(failedCount !== undefined ? { failedCount } : {}),
@@ -206,12 +225,10 @@ export function keptCountOf(sig: Signal): number {
 }
 
 /**
- * The union of files touched by every KEPT batch item — the driver's commit-fallback scope.
+ * The union of files touched by every KEPT batch item — the driver's exact commit scope.
  *
- * When an IMPROVE agent kept changes but failed to commit them, these are the ONLY paths the
- * driver stages, so the fallback commits exactly the kept work and never sweeps unrelated
- * working-tree changes. Empty when no kept item reported files (the fallback then commits nothing
- * and the leftover is surfaced by the driver's end-of-loop clean-tree warning instead).
+ * The driver validates these paths against the pre-IMPROVE dirty baseline and current exact file
+ * status before staging them. A structured signal with a kept item but no files is rejected.
  */
 export function keptFilesOf(sig: Signal): string[] {
   const files = new Set<string>()

@@ -203,10 +203,17 @@ retry-now install codex      # その後 Codex 内で  $retry-now
 | `maxIterations` | 総生数のハード安全上限 | `50` |
 | `improvementBatchSize` | 1 生あたりの計画項目の上限（`1`..`16`; `1` = 旧来の単一変更） | `8` |
 | `skipPermissions` | 無人実行: エージェントの権限確認をスキップ | `true` |
-| `commitPerIteration` | 各生の保持変更を git コミット（`retry-now#NNNN:` プレフィックス） | `true` |
+| `commitPerIteration` | ドライバーが各生の保持変更を、適用/計画数と項目別根拠付きでコミット（`retry-now#NNNN:` プレフィックス） | `true` |
 | `verifyEnabled` + `verifyTest` / `verifyLint` | IMPROVE 後に test/lint を実行し、失敗時に巻き戻し | `false` / `""` |
 | `benchCommand` + `benchRuns` | before/after ベンチマーク（N 回の中央値）、リグレッション時に巻き戻し | `""` / `5` |
 | `targets` | 分割モード用のパッケージパス一覧; 空なら全体 | `[]` |
+
+コミットを有効にすると、件名は `retry-now#0026: batch — ... (5/7 applied)` のように、
+その生で検討した全項目のうち何件が適用されたかを示します。本文には適用項目ごとの改善効果と
+検証根拠、および reverted / failed / skipped 項目を採用しなかった理由（ベンチマーク悪化と
+ロールバック判断を含む）を記録します。
+自動コミット時の帰属を確実にするため、IMPROVE 開始前に選択されたリポジトリ／パッケージ範囲が
+クリーンである必要があります。既存の作業がある場合、輪廻コミットに混ぜず停止します。
 
 ### パッケージ別 分割輪廻
 

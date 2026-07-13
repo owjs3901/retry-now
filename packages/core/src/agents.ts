@@ -37,8 +37,8 @@ export function modelForPhase(config: RetryNowConfig, phase: Phase): string {
 }
 
 /**
- * The highest-tier opencode `--variant` to use when the user configured none — so an unattended
- * loop always runs at maximum reasoning effort by default. The top tier is provider-specific
+ * The highest model effort to use when the user configured none — so an unattended loop always
+ * runs at maximum reasoning effort by default. The top tier is provider-specific
  * (OpenAI's is `xhigh`, Anthropic's is `max`), so key off the model id's `provider/` prefix;
  * anything else — including an agent-default model with no id — floors to `max`.
  */
@@ -48,11 +48,11 @@ export function topVariantForModel(model: string): string {
 }
 
 /**
- * The opencode `--variant` for this phase. Mirrors `modelForPhase`: the phase-specific variant
- * wins, then the shared `modelVariant`, and when BOTH are empty it falls back to the highest tier
- * for this phase's model (`topVariantForModel`) — so "no setting" means "top grade", never "off".
+ * The model variant for this phase. Mirrors `modelForPhase`: the phase-specific variant wins,
+ * then the shared `modelVariant`, and when BOTH are empty it falls back to the highest tier for
+ * this phase's model (`topVariantForModel`) — so "no setting" means "top grade", never "off".
  * This is what lets ANALYZE and IMPROVE carry DIFFERENT top-tier variants (e.g. Anthropic `max`
- * for analyze, OpenAI `xhigh` for improve) even though one reincarnation passes a single `--variant`.
+ * for analyze, OpenAI `xhigh` for improve) even though one reincarnation passes one variant.
  */
 export function variantForPhase(config: RetryNowConfig, phase: Phase): string {
   const phaseVariant =
@@ -95,6 +95,10 @@ export function buildAgentCommand(
       }
       args.push('--skip-git-repo-check')
       if (model) args.push('--model', model)
+      const variant = variantForPhase(config, phase)
+      if (variant) {
+        args.push('--config', `model_reasoning_effort="${variant}"`)
+      }
       args.push(message) // prompt is the trailing positional
       return { cmd: 'codex', args }
     }
@@ -109,6 +113,8 @@ export function buildAgentCommand(
         '--no-session-persistence',
       ]
       if (model) args.push('--model', model)
+      const variant = variantForPhase(config, phase)
+      if (variant) args.push('--effort', variant)
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
       return { cmd: 'claude', args }
     }
