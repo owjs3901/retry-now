@@ -56,7 +56,14 @@ retry-now run    # reincarnate until consummated
 ```
 
 `init` auto-detects your stack (via [`@retry-now/detect`](https://www.npmjs.com/package/@retry-now/detect))
-to pre-fill sensible test / lint / benchmark commands. Everything is written to `.retry-now/config.json`.
+to pre-fill sensible test / lint / benchmark commands. It also lets ANALYZE, per-item implementation,
+and independent review each choose its own `opencode` / `codex` / `claude` CLI, model, and variant.
+Everything is written to `.retry-now/config.json`.
+
+Safety snapshots cover Git-visible tracked and non-ignored untracked files plus the exact Git index;
+Git-ignored files are outside the transaction boundary. Unauthorized agent commits are never reset
+automatically: they create a project-level quarantine that blocks `run` until the expected HEAD is restored
+or `retry-now reset` explicitly accepts the current repository state by clearing the marker.
 
 See the **[main README](https://github.com/owjs3901/retry-now#readme)** for the loop model, the three
 intent prompts, and the full configuration reference.

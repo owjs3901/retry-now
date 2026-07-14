@@ -5,7 +5,7 @@ coverageThreshold = { lines = 1.0, functions = 1.0, statements = 1.0 }
 coverageReporter  = ["text", "lcov"]
 coveragePathIgnorePatterns = [
   "**/*.js",
-  "packages/core/src/driver.ts",
+  "packages/core/src/loop-driver.ts",
   "packages/core/src/frontends.ts",
   "packages/core/src/index.ts",
   "packages/core/src/scaffold.ts",

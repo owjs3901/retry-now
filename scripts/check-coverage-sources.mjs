@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 const ROOT = process.cwd()
 const EXCLUDED_CORE = new Set([
-  'driver.ts', // subprocess/process orchestration; exercised through integration/manual QA
+  'loop-driver.ts', // subprocess/process orchestration; exercised through integration/manual QA
   'frontends.ts', // agent-home/project installer boundary
   'index.ts', // public re-export barrel
   'scaffold.ts', // runtime filesystem scaffolding boundary

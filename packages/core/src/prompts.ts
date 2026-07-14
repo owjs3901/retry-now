@@ -32,8 +32,8 @@ function signalShapeAnalyze(stateDir: string): string {
   "report": "${stateDir}/reports/<PADDED>-analyze.md",
   "nextImprovement": "short title of the FIRST plan item (empty if none)",
   "plannedImprovements": [
-    { "id": "1", "title": "<title of item 1>", "risk": "low" },
-    { "id": "2", "title": "<title of item 2>", "risk": "low" }
+    { "id": "1", "title": "<title of item 1>", "risk": "low", "targetFiles": ["src/a.ts"], "approach": "exact implementation steps", "verification": "specific checks that prove it works" },
+    { "id": "2", "title": "<title of item 2>", "risk": "low", "targetFiles": ["src/b.ts"], "approach": "exact implementation steps", "verification": "specific checks that prove it works" }
   ],
   "summary": "1-2 sentence summary",
   "timestamp": "<ISO-8601>"

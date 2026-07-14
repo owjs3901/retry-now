@@ -15,9 +15,16 @@
  */
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { AGENT_LABEL, buildAgentCommand, modelForPhase } from './agents.ts'
+import {
+  AGENT_LABEL,
+  agentForRole,
+  buildAgentCommand,
+  modelForPhase,
+  modelForRole,
+} from './agents.ts'
 import { loadConfig } from './config.ts'
 import {
   commitPaths,
@@ -30,11 +37,14 @@ import {
   statusPorcelain,
   validateCommitFileAttribution,
 } from './git.ts'
+import { runImproveBatch } from './improve-runner.ts'
+import { createImproveStageExecutor } from './improve-stage.ts'
 import {
   appendLine,
   ensureDir,
   exists,
   nowIso,
+  readJson,
   readText,
   writeJson,
   writeText,
@@ -42,6 +52,11 @@ import {
 import { acquireDriverLock, releaseDriverLock } from './lock.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 import { quotaExhaustedInLog } from './quota.ts'
+import {
+  guardAnalyzeRepository,
+  rollbackIterationRepository,
+} from './repository-guard.ts'
+import { captureRepositorySnapshot } from './repository-snapshot.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
 import {
   beginPhase,
@@ -58,7 +73,9 @@ import {
 } from './state.ts'
 import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
 import type {
+  AgentRole,
   DriverOptions,
+  ImproveStage,
   LoopState,
   Phase,
   PlannedImprovement,
@@ -85,7 +102,7 @@ function composeMessage(
 }
 
 /** Spawn an agent CLI, tee its output to a log file, resolve with the exit code. */
-function runAgent(
+export function runAgent(
   cmd: string,
   args: readonly string[],
   cwd: string,
@@ -93,7 +110,13 @@ function runAgent(
   log: (line: string) => void,
 ): Promise<number> {
   return new Promise((resolve) => {
-    const out = createWriteStream(logPath, { flags: 'a' })
+    const out = createWriteStream(logPath, { flags: 'w' })
+    let settled = false
+    const finish = (code: number): void => {
+      if (settled) return
+      settled = true
+      out.end(() => resolve(code))
+    }
     const child = spawn(cmd, [...args], {
       cwd,
       shell: false,
@@ -106,18 +129,22 @@ function runAgent(
     child.stderr.on('data', (d: Buffer) => out.write(d))
     child.on('error', (err) => {
       log(`  ! spawn failed: ${err.message}`)
-      out.end()
-      resolve(-1)
+      finish(-1)
     })
     child.on('close', (code) => {
-      out.end()
-      resolve(code ?? -1)
+      finish(code ?? -1)
     })
   })
 }
 
 /** Synthetic signal used by --dry-run to exercise the full control flow without an agent. */
-function synthSignal(iter: number, phase: Phase): Signal {
+function synthSignal(
+  iter: number,
+  phase: Phase,
+  plannedCount = 1,
+  item?: PlannedImprovement,
+  report = '(dry-run)',
+): Signal {
   if (phase === 'analyze') {
     const found = iter === 1 // life 1 finds one improvement; later lives find none → converge
     return {
@@ -127,7 +154,11 @@ function synthSignal(iter: number, phase: Phase): Signal {
       report: `(dry-run)`,
       nextImprovement: found ? '(dry-run improvement)' : '',
       plannedImprovements: found
-        ? [{ id: '1', title: '(dry-run improvement)', risk: 'low' }]
+        ? Array.from({ length: plannedCount }, (_, index) => ({
+            id: String(index + 1),
+            title: `(dry-run improvement ${index + 1})`,
+            risk: 'low' as const,
+          }))
         : [],
       summary: '(dry-run)',
       timestamp: nowIso(),
@@ -137,15 +168,15 @@ function synthSignal(iter: number, phase: Phase): Signal {
     iteration: iter,
     phase,
     result: 'applied',
-    report: '(dry-run)',
+    report,
     appliedImprovements: [
       {
-        id: '1',
-        title: '(dry-run improvement)',
+        id: item?.id ?? '1',
+        title: item?.title ?? '(dry-run improvement)',
         status: 'kept',
         impact: '(dry-run impact)',
         decisionReason: '(dry-run verification passed)',
-        files: ['(dry-run-file)'],
+        files: [`dry-run-${item?.id ?? '1'}.txt`],
       },
     ],
     plannedCount: 1,
@@ -159,6 +190,15 @@ function synthSignal(iter: number, phase: Phase): Signal {
   }
 }
 
+type PhaseInvocation = {
+  readonly role: AgentRole
+  readonly message: string
+  readonly logPath: string
+  readonly item?: PlannedImprovement
+  readonly stage?: ImproveStage
+  readonly reportPath?: string
+}
+
 async function runPhase(
   paths: Paths,
   config: RetryNowConfig,
@@ -168,20 +208,48 @@ async function runPhase(
   log: (line: string) => void,
   stateDirRel: string,
   scope: string,
+  invocation?: PhaseInvocation,
 ): Promise<Signal | null> {
-  await beginPhase(paths, iter, phase, scope)
+  await beginPhase(
+    paths,
+    iter,
+    phase,
+    scope,
+    invocation?.item && invocation.stage
+      ? { id: invocation.item.id, stage: invocation.stage }
+      : undefined,
+  )
 
   if (opts.dryRun) {
-    await writeJson(paths.signal, synthSignal(iter, phase))
+    const synthetic = synthSignal(
+      iter,
+      phase,
+      config.improvementBatchSize,
+      invocation?.item,
+      invocation?.reportPath,
+    )
+    if (invocation?.reportPath) {
+      await writeText(
+        invocation.reportPath,
+        `(dry-run ${invocation.stage} report)\n`,
+      )
+    }
+    if (invocation?.logPath) await writeText(invocation.logPath, '')
+    await writeJson(paths.signal, synthetic)
   } else {
+    const role = invocation?.role ?? phase
     const { cmd, args } = buildAgentCommand(
       config,
-      composeMessage(iter, phase, stateDirRel, scope),
-      phase,
+      invocation?.message ?? composeMessage(iter, phase, stateDirRel, scope),
+      role,
     )
-    const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
-    const model = modelForPhase(config, phase) || 'agent default'
-    log(`  ↳ ${AGENT_LABEL[config.agent]} ${phase} (${model}, fresh session)…`)
+    const logPath =
+      invocation?.logPath ??
+      join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
+    const model = modelForRole(config, role) || 'agent default'
+    log(
+      `  ↳ ${AGENT_LABEL[agentForRole(config, role)]} ${invocation?.stage ?? phase} (${model}, fresh session)…`,
+    )
     const code = await runAgent(cmd, args, paths.root, logPath, log)
     if (code !== 0) log(`  ! agent exited with code ${code} (see ${logPath})`)
   }
@@ -245,7 +313,7 @@ function logQuotaGuidance(
     `  모든 계정의 쿼터가 소진되었습니다(429/rate-limit) — 재시도가 무의미하여 멈춥니다(크래시 아님).`,
   )
   log(
-    `  • 진행분은 이미 커밋되어 안전합니다. 쿼터가 다시 차면 재실행으로 마지막 상태부터 이어집니다.`,
+    `  • 완료된 이전 윤회는 안전합니다. 중단된 현재 윤회는 시작 상태로 복원되었으며 재실행 시 처음부터 다시 시도합니다.`,
   )
   log(`  • 로그 확인: ${paths.logsDir}`)
   if (!config.waitForQuota) {
@@ -253,6 +321,49 @@ function logQuotaGuidance(
       `  • 자동 대기·재개를 원하면 config의 \`waitForQuota: true\` 또는 \`--wait-for-quota\` 플래그.`,
     )
   }
+}
+
+type HeadQuarantine = {
+  readonly expectedHead: string
+  readonly actualHead: string
+  readonly iteration: number
+  readonly source: 'analyze' | 'implement' | 'review' | 'batch'
+  readonly itemId?: string
+  readonly createdAt: string
+}
+
+function isHeadQuarantine(value: unknown): value is HeadQuarantine {
+  if (typeof value !== 'object' || value === null) return false
+  return (
+    'expectedHead' in value &&
+    typeof value.expectedHead === 'string' &&
+    'actualHead' in value &&
+    typeof value.actualHead === 'string'
+  )
+}
+
+async function quarantineHeadChange(
+  paths: Paths,
+  quarantine: Omit<HeadQuarantine, 'createdAt'>,
+): Promise<void> {
+  await writeJson(paths.headQuarantine, {
+    ...quarantine,
+    createdAt: nowIso(),
+  } satisfies HeadQuarantine)
+}
+
+async function headQuarantineReason(paths: Paths): Promise<string | null> {
+  if (!(await exists(paths.headQuarantine))) return null
+  const quarantine = await readJson<unknown>(paths.headQuarantine)
+  if (!isHeadQuarantine(quarantine)) {
+    return `HEAD quarantine is unreadable: ${paths.headQuarantine}. Run retry-now reset only after inspecting the repository.`
+  }
+  const currentHead = await headRevision(paths.root)
+  if (currentHead === quarantine.expectedHead) {
+    await rm(paths.headQuarantine, { force: true })
+    return null
+  }
+  return `unauthorized Git HEAD remains quarantined (expected ${quarantine.expectedHead}, current ${currentHead ?? '(unavailable)'}). Restore the expected HEAD or run retry-now reset to explicitly accept the current repository state.`
 }
 
 /** Apply the terminal status + guidance for a non-`ok` phase outcome (quota pause vs crash). */
@@ -300,8 +411,10 @@ async function runPhaseResilient(
   scope: string,
   validate?: (signal: Signal) => string | null,
   retryGuard?: () => Promise<string | null>,
+  invocation?: PhaseInvocation,
 ): Promise<PhaseOutcome> {
-  const logPath = join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
+  const logPath =
+    invocation?.logPath ?? join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
   const waitDeadline = Date.now() + config.maxQuotaWaitMs
   let attempt = 0
   while (attempt < PHASE_ATTEMPTS) {
@@ -315,6 +428,7 @@ async function runPhaseResilient(
       log,
       stateDirRel,
       scope,
+      invocation,
     )
     if (sig) {
       const issue = validate?.(sig) ?? null
@@ -370,6 +484,7 @@ async function appendHistory(
   phase: Phase,
   sig: Signal,
 ): Promise<void> {
+  const role: AgentRole = phase === 'analyze' ? 'analyze' : 'review'
   await appendLine(
     paths.history,
     JSON.stringify({
@@ -377,8 +492,8 @@ async function appendHistory(
       iteration: iter,
       phase,
       result: sig.result,
-      agent: config.agent,
-      model: modelForPhase(config, phase) || 'agent default',
+      agent: agentForRole(config, role),
+      model: modelForRole(config, role) || 'agent default',
       summary: sig.summary,
       report: sig.report,
       ...(sig.nextImprovement ? { nextImprovement: sig.nextImprovement } : {}),
@@ -445,8 +560,8 @@ async function writeSummary(
     if (!t) continue
     try {
       entries.push(JSON.parse(t) as HistoryEntry)
-    } catch {
-      /* skip malformed line */
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err
     }
   }
   const improves = entries.filter((e) => e.phase === 'improve')
@@ -485,8 +600,9 @@ async function writeSummary(
     `- iterations: ${state.iteration}`,
     `- final streak: ${state.noImprovementStreak}/${config.threshold}`,
     `- final revert-streak: ${state.revertStreak}/${config.revertThreshold}`,
-    `- analyze agent/model: ${config.agent} / ${modelForPhase(config, 'analyze') || 'agent default'}`,
-    `- improve agent/model: ${config.agent} / ${modelForPhase(config, 'improve') || 'agent default'}`,
+    `- analyze agent/model: ${agentForRole(config, 'analyze')} / ${modelForRole(config, 'analyze') || 'agent default'}`,
+    `- implement agent/model: ${agentForRole(config, 'improve')} / ${modelForRole(config, 'improve') || 'agent default'}`,
+    `- review agent/model: ${agentForRole(config, 'review')} / ${modelForRole(config, 'review') || 'agent default'}`,
     `- commit-per-iteration: ${config.commitPerIteration ? 'on' : 'off'}`,
     `- started: ${state.startedAt}`,
     `- ended: ${state.updatedAt}`,
@@ -699,6 +815,19 @@ async function runOneLoop(
 
   const state = await loadState(paths, config.threshold, config.revertThreshold)
 
+  const quarantineReason = await headQuarantineReason(paths)
+  if (quarantineReason !== null) {
+    state.status = 'error'
+    await saveState(paths, state)
+    log(`[${label}] ${quarantineReason}`)
+    return {
+      status: state.status,
+      iterations: state.iteration,
+      finalStreak: state.noImprovementStreak,
+      threshold: state.threshold,
+    }
+  }
+
   if (state.status.startsWith('stopped')) {
     log(
       `[${label}] 이미 '${state.status}'. 리셋하려면 ${stateDirRel}/state.json 을 삭제.`,
@@ -744,6 +873,16 @@ async function runOneLoop(
     log('─'.repeat(56))
     log(`${rebirth(iter)}${target ? ` · ${target}` : ''}`)
 
+    const analyzeSnapshot = opts.dryRun
+      ? null
+      : await captureRepositorySnapshot(paths.root)
+    if (!opts.dryRun && analyzeSnapshot === null) {
+      state.status = 'error'
+      log(
+        `[${label}][${iter}] ANALYZE 시작 전 Git-visible 저장소 스냅샷을 만들 수 없습니다. 충돌 상태 또는 서브모듈을 확인하세요.`,
+      )
+      break
+    }
     const a = await runPhaseResilient(
       paths,
       config,
@@ -754,6 +893,34 @@ async function runOneLoop(
       stateDirRel,
       scope,
     )
+    if (analyzeSnapshot !== null) {
+      const analyzeGuard = await guardAnalyzeRepository(
+        paths.root,
+        analyzeSnapshot,
+      )
+      if (analyzeGuard.kind === 'head-changed') {
+        await quarantineHeadChange(paths, {
+          expectedHead: analyzeGuard.expectedHead,
+          actualHead: analyzeGuard.actualHead,
+          iteration: iter,
+          source: 'analyze',
+        })
+        state.status = 'error'
+        log(
+          `[${label}][${iter}] ANALYZE가 Git HEAD를 변경했습니다. 자동 reset 없이 격리했습니다.`,
+        )
+        break
+      }
+      if (analyzeGuard.kind === 'restored' || analyzeGuard.kind === 'failed') {
+        state.status = 'error'
+        log(
+          analyzeGuard.kind === 'restored'
+            ? `[${label}][${iter}] ANALYZE가 저장소를 변경하여 시작 상태로 복원하고 중단했습니다.`
+            : `[${label}][${iter}] ANALYZE 변경 복원 실패 — ${analyzeGuard.issue}`,
+        )
+        break
+      }
+    }
     if (a.kind !== 'ok') {
       handlePhaseStop(state, a.kind, label, iter, 'analyze', config, paths, log)
       break
@@ -786,9 +953,10 @@ async function runOneLoop(
     const baselineDirty = opts.dryRun
       ? []
       : await statusPaths(paths.root, scope ? [scope] : [])
+    const iterationSnapshot = opts.dryRun ? null : analyzeSnapshot
     const baselineHead = opts.dryRun
       ? '(dry-run)'
-      : await headRevision(paths.root)
+      : (iterationSnapshot?.head ?? null)
     if (!opts.dryRun && baselineDirty === null) {
       state.status = 'error'
       log(
@@ -814,38 +982,95 @@ async function runOneLoop(
       )
       break
     }
-    const b = await runPhaseResilient(
+    const executeItemStage = createImproveStageExecutor({
+      paths,
+      scope,
+      dryRun: opts.dryRun,
+      initialBaseline: baselineDirty ?? [],
+      ...(iterationSnapshot === null
+        ? {}
+        : { initialSnapshot: iterationSnapshot }),
+      log,
+      validate: (signal, run) => validateImproveSignal(signal, [run.item]),
+      executePhase: (stagePaths, validate, retryGuard, run) =>
+        runPhaseResilient(
+          stagePaths,
+          config,
+          iter,
+          'improve',
+          opts,
+          log,
+          stateDirRel,
+          scope,
+          validate,
+          retryGuard,
+          {
+            role: run.role,
+            message: run.message,
+            logPath: run.artifacts.log,
+            item: run.item,
+            stage: run.stage,
+            reportPath: run.artifacts.report,
+          },
+        ),
+    })
+    const b = await runImproveBatch({
       paths,
       config,
-      iter,
-      'improve',
-      opts,
-      log,
+      iteration: iter,
+      planned,
       stateDirRel,
       scope,
-      (signal) => validateImproveSignal(signal, planned),
-      async () => {
-        if (baselineDirty === null) {
-          return 'pre-IMPROVE dirty-file baseline is unavailable'
-        }
-        if (baselineDirty.length > 0) {
-          return 'pre-existing dirty files make an IMPROVE retry ambiguous'
-        }
-        const currentHead = await headRevision(paths.root)
-        if (currentHead !== baselineHead) {
-          return 'Git HEAD changed during the IMPROVE attempt'
-        }
-        const current = await statusPaths(paths.root, scope ? [scope] : [])
-        if (current === null) return 'current dirty-file status is unavailable'
-        return validateCommitFileAttribution([], baselineDirty, current, scope)
-      },
-    )
+      log,
+      execute: executeItemStage,
+    })
     if (b.kind !== 'ok') {
+      if (b.kind === 'head-changed') {
+        await quarantineHeadChange(paths, {
+          expectedHead: b.expectedHead,
+          actualHead: b.actualHead,
+          iteration: iter,
+          source: b.stage,
+          itemId: b.itemId,
+        })
+        state.status = 'error'
+        log(
+          `[${label}][${iter}] item ${b.itemId} ${b.stage}가 Git HEAD를 변경했습니다. 커밋은 자동 reset하지 않고 격리했습니다.`,
+        )
+        break
+      }
+      if (iterationSnapshot !== null) {
+        const restoreIssue = await rollbackIterationRepository(
+          paths.root,
+          iterationSnapshot,
+        )
+        if (restoreIssue !== null) {
+          state.status = 'error'
+          log(
+            `[${label}][${iter}] 중단된 IMPROVE 윤회 복원 실패 — ${restoreIssue}`,
+          )
+          break
+        }
+        log(
+          `[${label}][${iter}] 중단된 IMPROVE 윤회를 시작 상태로 복원했습니다.`,
+        )
+      }
       handlePhaseStop(state, b.kind, label, iter, 'improve', config, paths, log)
       break
     }
     const improveSig = b.signal
-    if (!opts.dryRun && (await headRevision(paths.root)) !== baselineHead) {
+    const finalHead = opts.dryRun
+      ? baselineHead
+      : await headRevision(paths.root)
+    if (!opts.dryRun && finalHead !== baselineHead) {
+      if (typeof baselineHead === 'string' && finalHead !== null) {
+        await quarantineHeadChange(paths, {
+          expectedHead: baselineHead,
+          actualHead: finalHead,
+          iteration: iter,
+          source: 'batch',
+        })
+      }
       state.status = 'error'
       log(
         `[${label}][${iter}] IMPROVE 중 Git HEAD가 변경되었습니다. 에이전트 커밋은 허용되지 않으며 드라이버 상세 커밋을 만들 수 없습니다.`,
@@ -953,8 +1178,9 @@ async function runLoopBody(
 ): Promise<DriverResult> {
   log(BANNER)
   log(
-    `agent=${AGENT_LABEL[config.agent]}  stop-after=${config.threshold} no-improve / ${config.revertThreshold} reverts  ` +
-      `analyze-model=${modelForPhase(config, 'analyze') || 'agent default'}  improve-model=${modelForPhase(config, 'improve') || 'agent default'}  ` +
+    `agents=analyze:${AGENT_LABEL[agentForRole(config, 'analyze')]}/implement:${AGENT_LABEL[agentForRole(config, 'improve')]}/review:${AGENT_LABEL[agentForRole(config, 'review')]}  ` +
+      `models=analyze:${modelForRole(config, 'analyze') || 'agent default'}/implement:${modelForRole(config, 'improve') || 'agent default'}/review:${modelForRole(config, 'review') || 'agent default'}  ` +
+      `stop-after=${config.threshold} no-improve / ${config.revertThreshold} reverts  ` +
       `max-iters=${config.maxIterations}  commit=${config.commitPerIteration ? 'on' : 'off'}  ` +
       `bench=${config.benchCommand ? `on×${config.benchRuns}` : 'off'}` +
       `${config.targets.length > 0 ? `  targets=${config.targets.length}` : ''}${opts.dryRun ? '  [DRY-RUN]' : ''}`,

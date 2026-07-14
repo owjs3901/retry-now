@@ -9,6 +9,11 @@
 /** Which headless coding agent the driver spawns each reincarnation. */
 export type AgentKind = 'opencode' | 'codex' | 'claude'
 
+/** The independently configurable jobs performed by fresh agent sessions. */
+export type AgentRole = 'analyze' | 'improve' | 'review'
+
+export type ImproveStage = 'implement' | 'review'
+
 /** The two phases of a single iteration (윤회 한 생). */
 export type Phase = 'analyze' | 'improve'
 
@@ -24,12 +29,20 @@ export interface RetryNowConfig {
   readonly version: 1
   /** which agent CLI drives each reincarnation */
   readonly agent: AgentKind
+  /** agent CLI for ANALYZE; normalized from `agent` when omitted */
+  readonly analysisAgent: AgentKind
+  /** agent CLI for implementation; normalized from `agent` when omitted */
+  readonly improveAgent: AgentKind
+  /** agent CLI for review; normalized from `improveAgent`, then `agent`, when omitted */
+  readonly reviewAgent: AgentKind
   /** optional explicit model id (provider/model); empty = agent default */
   readonly model: string
   /** optional ANALYZE-phase model id; empty = `model` fallback, then agent default */
   readonly analysisModel: string
   /** optional IMPROVE/sub-implementation model id; empty = `model` fallback, then agent default */
   readonly improveModel: string
+  /** optional review model id; empty = `improveModel`, then `model`, then agent default */
+  readonly reviewModel: string
   /**
    * optional provider-specific model variant (opencode `--variant`, Codex
    * `model_reasoning_effort`, or Claude Code `--effort`); empty = highest tier inferred from the
@@ -44,6 +57,8 @@ export interface RetryNowConfig {
   readonly analysisVariant: string
   /** optional IMPROVE-phase model variant; empty = `modelVariant`, then inferred top tier */
   readonly improveVariant: string
+  /** optional review variant; empty = `improveVariant`, then `modelVariant`, then inferred top tier */
+  readonly reviewVariant: string
   /** optional agent profile name (opencode `--agent`); empty = default */
   readonly agentProfile: string
   /**
@@ -173,6 +188,12 @@ export interface PlannedImprovement {
   title: string
   /** rough risk the analyst assigns the change; informs IMPROVE ordering/grouping */
   risk?: 'low' | 'medium' | 'high'
+  /** repository-relative files the analyst expects this item to change */
+  targetFiles?: readonly string[]
+  /** exact implementation sketch that lets a fresh session act without re-analysis */
+  approach?: string
+  /** concrete proof the implementer and reviewer must independently run/check */
+  verification?: string
 }
 
 /** Outcome of a single batch item after IMPROVE's per-item keep/revert gate. */
@@ -236,6 +257,9 @@ export interface Current {
   /** zero-padded id used to name output files, e.g. "0012" */
   padded: string
   phase: Phase
+  /** IMPROVE only: the single plan item and independent session stage. */
+  itemId?: string
+  stage?: ImproveStage
   /** when set, this life is scoped to a single package path (per-package 윤회) */
   target?: string
 }

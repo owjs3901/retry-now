@@ -43,10 +43,17 @@ The engine is dependency-light and runs on **[Bun](https://bun.sh)** ≥ 1.1.
 
 ## How one life runs
 
-Each iteration is a brand-new agent session with no memory of previous lives. It **ANALYZE**s the
-code read-only, produces a batch plan of independently revertible items, **IMPROVE**s them one by one
-(backing up and reverting per item on any regression), and the driver records the result. The loop
+Each iteration starts with a brand-new ANALYZE session. It reads the code, produces a batch plan of
+independently revertible items, then the driver runs a fresh implementation session and a separate
+fresh review session for each item. Only reviewed outcomes are recorded. Analysis, implementation,
+and review may each select a different CLI agent, model, and variant. The loop
 stops only when several consecutive lives honestly find nothing left to improve.
+
+Repository transactions cover **Git-visible files only**: tracked files, non-ignored untracked files,
+symlinks, modes, and exact raw index bytes. Git-ignored files are outside the restore boundary. ANALYZE
+mutations are restored by the driver, ordinary mid-batch aborts restore the full iteration start, and an
+agent-created commit is left untouched while a project-level HEAD quarantine blocks reruns. Repositories
+containing submodule/gitlink entries are rejected before an agent is launched.
 
 See the **[main README](https://github.com/owjs3901/retry-now#readme)** for the full model, the
 convergence rules, and configuration.

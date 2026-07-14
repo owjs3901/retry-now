@@ -9,9 +9,13 @@
 export {
   AGENT_LABEL,
   type AgentCommand,
+  agentForRole,
   buildAgentCommand,
+  modelForPhase,
+  modelForRole,
   topVariantForModel,
   variantForPhase,
+  variantForRole,
 } from './agents.ts'
 export {
   AGENT_KINDS,
@@ -24,14 +28,8 @@ export {
   isAgentKind,
   loadConfig,
   normalizeConfig,
+  type RawRetryNowConfig,
 } from './config.ts'
-export {
-  type DriverResult,
-  runDriverCli,
-  runLoop,
-  runProjectLoop,
-  type RunProjectOptions,
-} from './driver.ts'
 export {
   buildFrontend,
   buildFrontendBody,
@@ -49,23 +47,37 @@ export {
   statusPorcelain,
 } from './git.ts'
 export {
+  buildItemImplementPrompt,
+  buildItemReviewPrompt,
+} from './improve-prompts.ts'
+export {
   acquireDriverLock,
   type DriverLock,
   isPidAlive,
   type LockResult,
   releaseDriverLock,
 } from './lock.ts'
+export {
+  type DriverResult,
+  runDriverCli,
+  runLoop,
+  runProjectLoop,
+  type RunProjectOptions,
+} from './loop-driver.ts'
 export { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
+export { type ImproveItemPaths, resolveImproveItemPaths } from './paths.ts'
 export { buildAnalyzePrompt, buildImprovePrompt } from './prompts.ts'
 export { scaffold } from './scaffold.ts'
 export { loadState, saveState } from './state.ts'
 export { BANNER, converged, OATH, oathBlock, rebirth } from './theme.ts'
 export type {
   AgentKind,
+  AgentRole,
   AnalyzeResult,
   Current,
   DriverOptions,
   ImproveResult,
+  ImproveStage,
   LoopState,
   LoopStatus,
   Phase,

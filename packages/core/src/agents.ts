@@ -10,7 +10,7 @@
  *   claude    -p "<msg>" --bare  (--bare ⇒ clean slate: skips  code.claude.com/docs/en/headless
  *             CLAUDE.md/hooks/skills/MCP — ideal for unbiased rebirth)
  */
-import type { AgentKind, Phase, RetryNowConfig } from './types.ts'
+import type { AgentKind, AgentRole, Phase, RetryNowConfig } from './types.ts'
 
 export interface AgentCommand {
   readonly cmd: string
@@ -30,10 +30,38 @@ export const AGENT_LABEL: Record<AgentKind, string> = {
   claude: 'claude code',
 }
 
+export function agentForRole(
+  config: RetryNowConfig,
+  role: AgentRole,
+): AgentKind {
+  return {
+    analyze: config.analysisAgent || config.agent,
+    improve: config.improveAgent || config.agent,
+    review: config.reviewAgent || config.improveAgent || config.agent,
+  }[role]
+}
+
+export function modelForRole(config: RetryNowConfig, role: AgentRole): string {
+  const analysisAgent = agentForRole(config, 'analyze')
+  const improveAgent = agentForRole(config, 'improve')
+  const reviewAgent = agentForRole(config, 'review')
+  return {
+    analyze:
+      config.analysisModel ||
+      (analysisAgent === config.agent ? config.model : ''),
+    improve:
+      config.improveModel ||
+      (improveAgent === config.agent ? config.model : ''),
+    review:
+      config.reviewModel ||
+      (reviewAgent === improveAgent ? config.improveModel : '') ||
+      (reviewAgent === config.agent ? config.model : ''),
+  }[role]
+}
+
+/** Backward-compatible phase resolver for the existing two-phase driver. */
 export function modelForPhase(config: RetryNowConfig, phase: Phase): string {
-  const phaseModel =
-    phase === 'analyze' ? config.analysisModel : config.improveModel
-  return phaseModel || config.model
+  return modelForRole(config, phase)
 }
 
 /**
@@ -48,20 +76,42 @@ export function topVariantForModel(model: string): string {
 }
 
 /**
- * The model variant for this phase. Mirrors `modelForPhase`: the phase-specific variant wins,
+ * The model variant for this role. Mirrors `modelForRole`: the role-specific variant wins,
  * then the shared `modelVariant`, and when BOTH are empty it falls back to the highest tier for
- * this phase's model (`topVariantForModel`) — so "no setting" means "top grade", never "off".
+ * this role's model (`topVariantForModel`) — so "no setting" means "top grade", never "off".
  * This is what lets ANALYZE and IMPROVE carry DIFFERENT top-tier variants (e.g. Anthropic `max`
  * for analyze, OpenAI `xhigh` for improve) even though one reincarnation passes one variant.
  */
+export function variantForRole(
+  config: RetryNowConfig,
+  role: AgentRole,
+): string {
+  const analysisAgent = agentForRole(config, 'analyze')
+  const improveAgent = agentForRole(config, 'improve')
+  const reviewAgent = agentForRole(config, 'review')
+  const roleVariant = {
+    analyze:
+      config.analysisVariant ||
+      (analysisAgent === config.agent ? config.modelVariant : ''),
+    improve:
+      config.improveVariant ||
+      (improveAgent === config.agent ? config.modelVariant : ''),
+    review:
+      config.reviewVariant ||
+      (reviewAgent === improveAgent ? config.improveVariant : '') ||
+      (reviewAgent === config.agent ? config.modelVariant : ''),
+  }[role]
+  const model = modelForRole(config, role)
+  const defaultVariant =
+    model === '' && agentForRole(config, role) === 'codex'
+      ? 'xhigh'
+      : topVariantForModel(model)
+  return roleVariant || defaultVariant
+}
+
+/** Backward-compatible phase resolver for the existing two-phase driver. */
 export function variantForPhase(config: RetryNowConfig, phase: Phase): string {
-  const phaseVariant =
-    phase === 'analyze' ? config.analysisVariant : config.improveVariant
-  return (
-    phaseVariant ||
-    config.modelVariant ||
-    topVariantForModel(modelForPhase(config, phase))
-  )
+  return variantForRole(config, phase)
 }
 
 /**
@@ -72,15 +122,16 @@ export function variantForPhase(config: RetryNowConfig, phase: Phase): string {
 export function buildAgentCommand(
   config: RetryNowConfig,
   message: string,
-  phase: Phase,
+  role: AgentRole,
 ): AgentCommand {
-  const model = modelForPhase(config, phase)
-  switch (config.agent) {
+  const agent = agentForRole(config, role)
+  const model = modelForRole(config, role)
+  switch (agent) {
     case 'opencode': {
       const args: string[] = ['run', message]
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
       if (model) args.push('--model', model)
-      const variant = variantForPhase(config, phase)
+      const variant = variantForRole(config, role)
       if (variant) args.push('--variant', variant)
       if (config.agentProfile) args.push('--agent', config.agentProfile)
       return { cmd: 'opencode', args }
@@ -95,7 +146,7 @@ export function buildAgentCommand(
       }
       args.push('--skip-git-repo-check')
       if (model) args.push('--model', model)
-      const variant = variantForPhase(config, phase)
+      const variant = variantForRole(config, role)
       if (variant) {
         args.push('--config', `model_reasoning_effort="${variant}"`)
       }
@@ -113,11 +164,11 @@ export function buildAgentCommand(
         '--no-session-persistence',
       ]
       if (model) args.push('--model', model)
-      const variant = variantForPhase(config, phase)
+      const variant = variantForRole(config, role)
       if (variant) args.push('--effort', variant)
       if (config.skipPermissions) args.push('--dangerously-skip-permissions')
       return { cmd: 'claude', args }
     }
   }
-  throw new UnknownAgentError(config.agent)
+  throw new UnknownAgentError(agent)
 }

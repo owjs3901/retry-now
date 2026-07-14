@@ -24,12 +24,17 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
   return {
     version: 1,
     agent: 'opencode',
+    analysisAgent: 'opencode',
+    improveAgent: 'opencode',
+    reviewAgent: 'opencode',
     model: '',
     analysisModel: '',
     improveModel: '',
+    reviewModel: '',
     modelVariant: '',
     analysisVariant: '',
     improveVariant: '',
+    reviewVariant: '',
     agentProfile: '',
     analysis: 'ANALYSIS_SENTINEL',
     direction: 'DIRECTION_SENTINEL',
@@ -95,6 +100,9 @@ test('the §5 signal JSON contract and the analyze result enum values are preser
   expect(out).toContain('"phase": "analyze"')
   expect(out).toContain('"result": "improvements_found" | "no_improvements"')
   expect(out).toContain('"plannedImprovements": [')
+  expect(out).toContain('"targetFiles": [')
+  expect(out).toContain('"approach":')
+  expect(out).toContain('"verification":')
   // the field-contract bullets after the JSON.
   expect(out).toContain('`iteration` MUST equal the number in `current.json`.')
 })

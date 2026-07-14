@@ -32,31 +32,32 @@ import {
   MIN_IMPROVEMENT_BATCH_SIZE,
   MIN_QUOTA_POLL_MS,
   normalizeConfig,
+  type RawRetryNowConfig,
 } from '../config.ts'
 import { writeJson, writeText } from '../io.ts'
 import { resolvePaths } from '../paths.ts'
 import type { RetryNowConfig } from '../types.ts'
 
-/**
- * Cast helper for the malformed-input tests. The whole point of `normalizeConfig`
- * is to guard a JSON boundary where the static type guarantees nothing, so the test
- * suite must exercise inputs the `Partial<RetryNowConfig>` signature forbids.
- * Confined to this test file; production code never takes this cast.
- */
-function bad(value: object): Partial<RetryNowConfig> {
-  return value as unknown as Partial<RetryNowConfig>
+/** Mark malformed values that exercise the untrusted config boundary. */
+function bad(value: RawRetryNowConfig): RawRetryNowConfig {
+  return value
 }
 
 function validRaw(): Partial<RetryNowConfig> {
   return {
     version: 1,
     agent: 'opencode',
+    analysisAgent: 'claude',
+    improveAgent: 'codex',
+    reviewAgent: 'opencode',
     model: 'anthropic/claude-opus-4-7',
     analysisModel: 'openai/gpt-5.5-analyze',
     improveModel: 'openai/gpt-5.5-implement',
+    reviewModel: 'openai/gpt-5.5-review',
     modelVariant: 'xhigh',
     analysisVariant: 'max',
     improveVariant: 'xhigh',
+    reviewVariant: 'high',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -85,12 +86,17 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
   expect(out).toEqual({
     version: 1,
     agent: 'opencode',
+    analysisAgent: 'claude',
+    improveAgent: 'codex',
+    reviewAgent: 'opencode',
     model: 'anthropic/claude-opus-4-7',
     analysisModel: 'openai/gpt-5.5-analyze',
     improveModel: 'openai/gpt-5.5-implement',
+    reviewModel: 'openai/gpt-5.5-review',
     modelVariant: 'xhigh',
     analysisVariant: 'max',
     improveVariant: 'xhigh',
+    reviewVariant: 'high',
     agentProfile: 'build',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -196,6 +202,47 @@ test('phase-specific models fall back to the legacy shared model when omitted', 
   )
   expect(out.analysisModel).toBe('openai/shared')
   expect(out.improveModel).toBe('openai/shared')
+  expect(out.reviewModel).toBe('openai/shared')
+})
+
+test('role agents fall back through the legacy and implementation agent chain', () => {
+  const legacy = normalizeConfig({
+    agent: 'claude',
+    analysis: 'a',
+    direction: 'b',
+    completion: 'c',
+  })
+  const split = normalizeConfig({
+    agent: 'opencode',
+    analysisAgent: 'claude',
+    improveAgent: 'codex',
+    analysis: 'a',
+    direction: 'b',
+    completion: 'c',
+  })
+
+  expect(legacy.analysisAgent).toBe('claude')
+  expect(legacy.improveAgent).toBe('claude')
+  expect(legacy.reviewAgent).toBe('claude')
+  expect(split.analysisAgent).toBe('claude')
+  expect(split.improveAgent).toBe('codex')
+  expect(split.reviewAgent).toBe('codex')
+})
+
+test('review model and variant fall back to implementation before legacy shared values', () => {
+  const out = normalizeConfig({
+    agent: 'opencode',
+    model: 'openai/shared',
+    improveModel: 'openai/implementer',
+    modelVariant: 'medium',
+    improveVariant: 'xhigh',
+    analysis: 'a',
+    direction: 'b',
+    completion: 'c',
+  })
+
+  expect(out.reviewModel).toBe('openai/implementer')
+  expect(out.reviewVariant).toBe('xhigh')
 })
 
 test('phase-specific model ids override the legacy shared model', () => {
@@ -239,6 +286,7 @@ test('phase-specific variants fall back to the shared modelVariant when omitted'
   )
   expect(out.analysisVariant).toBe('xhigh')
   expect(out.improveVariant).toBe('xhigh')
+  expect(out.reviewVariant).toBe('xhigh')
 })
 
 test('phase-specific variants override the shared modelVariant', () => {
@@ -280,6 +328,7 @@ test('variants stay empty when neither per-phase nor shared is set (the adapter 
   expect(out.modelVariant).toBe('')
   expect(out.analysisVariant).toBe('')
   expect(out.improveVariant).toBe('')
+  expect(out.reviewVariant).toBe('')
 })
 
 test('int helper still falls back for non-numeric thresholds (sanity)', () => {
@@ -466,6 +515,16 @@ test('loadConfig reads and normalizes an on-disk config.json', async () => {
     expect(cfg?.analysis).toBe('analyse it')
     expect(cfg?.threshold).toBe(7)
     expect(cfg?.improvementBatchSize).toBe(5)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('loadConfig returns null when config JSON is not an object', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'retry-now-config-'))
+  try {
+    await writeText(resolvePaths(dir).config, 'null')
+    expect(await loadConfig(dir)).toBeNull()
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

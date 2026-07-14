@@ -1,18 +1,32 @@
 import { expect, test } from 'bun:test'
 
-import { buildAgentCommand, UnknownAgentError } from '../agents.ts'
+import {
+  agentForRole,
+  buildAgentCommand,
+  modelForPhase,
+  modelForRole,
+  UnknownAgentError,
+  variantForPhase,
+  variantForRole,
+} from '../agents.ts'
 import type { RetryNowConfig } from '../types.ts'
 
 function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
+  const agent = overrides.agent ?? 'opencode'
   return {
     version: 1,
-    agent: 'opencode',
+    agent,
+    analysisAgent: overrides.analysisAgent ?? agent,
+    improveAgent: overrides.improveAgent ?? agent,
+    reviewAgent: overrides.reviewAgent ?? overrides.improveAgent ?? agent,
     model: '',
     analysisModel: '',
     improveModel: '',
+    reviewModel: '',
     modelVariant: '',
     analysisVariant: '',
     improveVariant: '',
+    reviewVariant: '',
     agentProfile: '',
     analysis: 'analyse it',
     direction: 'improve it',
@@ -35,6 +49,79 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     ...overrides,
   }
 }
+
+test('role resolvers independently select analysis, implementation, and review settings', () => {
+  const config = cfg({
+    analysisAgent: 'claude',
+    improveAgent: 'codex',
+    reviewAgent: 'opencode',
+    analysisModel: 'anthropic/analyzer',
+    improveModel: 'openai/implementer',
+    reviewModel: 'openai/reviewer',
+    analysisVariant: 'max',
+    improveVariant: 'xhigh',
+    reviewVariant: 'high',
+  })
+
+  expect(agentForRole(config, 'analyze')).toBe('claude')
+  expect(agentForRole(config, 'improve')).toBe('codex')
+  expect(agentForRole(config, 'review')).toBe('opencode')
+  expect(modelForRole(config, 'analyze')).toBe('anthropic/analyzer')
+  expect(modelForRole(config, 'improve')).toBe('openai/implementer')
+  expect(modelForRole(config, 'review')).toBe('openai/reviewer')
+  expect(variantForRole(config, 'analyze')).toBe('max')
+  expect(variantForRole(config, 'improve')).toBe('xhigh')
+  expect(variantForRole(config, 'review')).toBe('high')
+})
+
+test('legacy phase resolvers preserve the analyze and improve settings', () => {
+  const config = cfg({
+    analysisModel: 'anthropic/analyzer',
+    improveModel: 'openai/implementer',
+    analysisVariant: 'max',
+    improveVariant: 'xhigh',
+  })
+
+  expect(modelForPhase(config, 'analyze')).toBe('anthropic/analyzer')
+  expect(modelForPhase(config, 'improve')).toBe('openai/implementer')
+  expect(variantForPhase(config, 'analyze')).toBe('max')
+  expect(variantForPhase(config, 'improve')).toBe('xhigh')
+})
+
+test('review command uses its own CLI agent, model, and variant', () => {
+  const command = buildAgentCommand(
+    cfg({
+      agent: 'claude',
+      improveAgent: 'codex',
+      reviewAgent: 'opencode',
+      improveModel: 'openai/implementer',
+      reviewModel: 'openai/reviewer',
+      improveVariant: 'xhigh',
+      reviewVariant: 'high',
+    }),
+    'review changes',
+    'review',
+  )
+
+  expect(command).toEqual({
+    cmd: 'opencode',
+    args: [
+      'run',
+      'review changes',
+      '--dangerously-skip-permissions',
+      '--model',
+      'openai/reviewer',
+      '--variant',
+      'high',
+    ],
+  })
+})
+
+test('review variant is inferred from the review model when no variant is configured', () => {
+  const config = cfg({ reviewModel: 'openai/reviewer' })
+
+  expect(variantForRole(config, 'review')).toBe('xhigh')
+})
 
 test('opencode command passes highest model variant separately from model and agent profile', () => {
   const command = buildAgentCommand(
@@ -214,7 +301,7 @@ test('codex command covers unattended and sandboxed modes', () => {
       'workspace-write',
       '--skip-git-repo-check',
       '--config',
-      'model_reasoning_effort="max"',
+      'model_reasoning_effort="xhigh"',
       'analyze',
     ],
   })
@@ -261,7 +348,8 @@ test('claude command uses bare fresh session flags and optional model/permission
 })
 
 test('unknown agent throws an explicit adapter error at the boundary', () => {
-  expect(() =>
-    buildAgentCommand(cfg({ agent: 'unknown' as never }), 'analyze', 'analyze'),
-  ).toThrow(UnknownAgentError)
+  const buildUnknownAgentCommand = () =>
+    buildAgentCommand(cfg({ agent: 'unknown' as never }), 'analyze', 'analyze')
+
+  expect(buildUnknownAgentCommand).toThrow(UnknownAgentError)
 })
