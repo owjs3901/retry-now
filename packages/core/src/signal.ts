@@ -5,6 +5,7 @@
  * detectable. The agent overwrites it as its LAST action. The driver then validates that
  * the signal matches the expected iteration+phase before trusting it.
  */
+import { isSafeRepoFilePath } from './git.ts'
 import { nowIso, readJson, writeJson } from './io.ts'
 import type { Paths } from './paths.ts'
 import { pad } from './paths.ts'
@@ -13,6 +14,7 @@ import type {
   AppliedImprovement,
   BatchItemStatus,
   Current,
+  ImproveStage,
   Phase,
   PlannedImprovement,
   Signal,
@@ -26,11 +28,15 @@ export async function beginPhase(
   iteration: number,
   phase: Phase,
   target?: string,
+  item?: { readonly id: string; readonly stage: ImproveStage },
 ): Promise<void> {
-  const current: Current =
-    target !== undefined && target !== ''
-      ? { iteration, padded: pad(iteration), phase, target }
-      : { iteration, padded: pad(iteration), phase }
+  const current: Current = {
+    iteration,
+    padded: pad(iteration),
+    phase,
+    ...(target !== undefined && target !== '' ? { target } : {}),
+    ...(item ? { itemId: item.id, stage: item.stage } : {}),
+  }
   await writeJson(paths.current, current)
   const pending: Signal = {
     iteration,
@@ -78,6 +84,16 @@ function optStr(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
+function optPlanText(v: unknown): string | undefined {
+  const text = optStr(v)?.trim()
+  return text !== undefined &&
+    text !== '' &&
+    text.length <= 2000 &&
+    !hasUnsafeTextCharacter(text)
+    ? text
+    : undefined
+}
+
 /** A count is trustworthy only when it is a finite, non-negative integer. */
 function optCount(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0
@@ -96,7 +112,26 @@ function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
     if (id === undefined || title === undefined) continue
     if (!/^\d{1,4}$/.test(id) || title === '' || title.length > 200) continue
     if (hasUnsafeTextCharacter(title)) continue
-    out.push(isRisk(item.risk) ? { id, title, risk: item.risk } : { id, title })
+    const targetFiles = Array.isArray(item.targetFiles)
+      ? [
+          ...new Set(
+            item.targetFiles
+              .filter((file): file is string => typeof file === 'string')
+              .map((file) => file.replace(/\\/g, '/'))
+              .filter(isSafeRepoFilePath),
+          ),
+        ].slice(0, 64)
+      : []
+    const approach = optPlanText(item.approach)
+    const verification = optPlanText(item.verification)
+    out.push({
+      id,
+      title,
+      ...(isRisk(item.risk) ? { risk: item.risk } : {}),
+      ...(targetFiles.length > 0 ? { targetFiles } : {}),
+      ...(approach !== undefined ? { approach } : {}),
+      ...(verification !== undefined ? { verification } : {}),
+    })
   }
   return out
 }

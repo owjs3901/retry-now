@@ -8,7 +8,6 @@
  */
 import * as p from '@clack/prompts'
 import {
-  type AgentKind,
   DEFAULT_BENCH_RUNS,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_REVERT_THRESHOLD,
@@ -17,10 +16,12 @@ import {
   oathBlock,
   type RetryNowConfig,
   scaffold,
-  variantForPhase,
+  variantForRole,
   VERSION,
 } from '@retry-now/core'
 import { detectCapabilities } from '@retry-now/detect'
+
+import { askRoleAgentSettings } from './agent-settings.ts'
 
 // Agent-bound defaults are English on purpose: they get injected into the analyze/improve
 // prompts sent every iteration, where English is more token-efficient than Korean.
@@ -50,54 +51,8 @@ export async function runInit(cwd: string): Promise<number> {
     '감지된 환경 (@retry-now/detect)',
   )
 
-  const agent = (await p.select({
-    message: '어떤 에이전트로 매 생(이터레이션)을 환생시킬까?',
-    options: [
-      { value: 'opencode', label: 'opencode', hint: 'opencode run' },
-      { value: 'codex', label: 'codex', hint: 'codex exec' },
-      { value: 'claude', label: 'claude code', hint: 'claude -p --bare' },
-    ],
-    initialValue: 'opencode' as AgentKind,
-  })) as AgentKind | symbol
-  if (cancelled(agent)) return cancel()
-
-  const analysisModel = (await p.text({
-    message:
-      '분석 모델 id (provider/model). 비워두면 에이전트 기본값 — 읽기/계획에 쓸 모델.',
-    placeholder: 'provider/model',
-    defaultValue: '',
-  })) as string | symbol
-  if (cancelled(analysisModel)) return cancel()
-
-  // Variants are per-phase, so a provider-split loop can give ANALYZE and IMPROVE different top
-  // tiers. Each adapter maps this value to its own CLI setting.
-  const variantSetting =
-    agent === 'codex'
-      ? 'Codex model_reasoning_effort'
-      : agent === 'claude'
-        ? 'Claude Code --effort'
-        : 'opencode --variant'
-  const analysisVariant = (await p.text({
-    message: `분석 모델 variant (${variantSetting}). 비워두면 최고 등급 자동 — 예: max / xhigh.`,
-    placeholder: 'max / xhigh',
-    defaultValue: '',
-  })) as string | symbol
-  if (cancelled(analysisVariant)) return cancel()
-
-  const improveModel = (await p.text({
-    message:
-      '구현 모델 id (provider/model). 비워두면 에이전트 기본값 — 각 개선 항목의 순차 sub-implementation에 쓸 모델.',
-    placeholder: 'provider/model',
-    defaultValue: '',
-  })) as string | symbol
-  if (cancelled(improveModel)) return cancel()
-
-  const improveVariant = (await p.text({
-    message: `구현 모델 variant (${variantSetting}). 비워두면 최고 등급 자동 — 예: max / xhigh.`,
-    placeholder: 'max / xhigh',
-    defaultValue: '',
-  })) as string | symbol
-  if (cancelled(improveVariant)) return cancel()
+  const roleAgents = await askRoleAgentSettings()
+  if (!roleAgents) return cancel()
 
   const analysis = (await p.text({
     message: '1. 분석 및 계획 — 무엇을 분석/계획할지',
@@ -286,11 +241,8 @@ export async function runInit(cwd: string): Promise<number> {
   let config: RetryNowConfig
   try {
     config = normalizeConfig({
-      agent,
-      analysisModel,
-      improveModel,
-      analysisVariant,
-      improveVariant,
+      agent: roleAgents.analysisAgent,
+      ...roleAgents,
       analysis,
       direction,
       completion,
@@ -307,7 +259,7 @@ export async function runInit(cwd: string): Promise<number> {
       targets,
     })
   } catch (err) {
-    p.cancel(`설정 오류: ${(err as Error).message}`)
+    p.cancel(`설정 오류: ${err instanceof Error ? err.message : String(err)}`)
     return 1
   }
 
@@ -319,8 +271,9 @@ export async function runInit(cwd: string): Promise<number> {
       config.targets.length > 0
         ? `윤회 모드: 패키지별 분할 (${config.targets.length}개 타겟, 각자 독립 수렴)`
         : `윤회 모드: 전체 레포 단일 윤회`,
-      `모델: 분석=${config.analysisModel || 'agent default'} / 구현=${config.improveModel || 'agent default'}`,
-      `variant: 분석=${variantForPhase(config, 'analyze')} / 구현=${variantForPhase(config, 'improve')} (미설정 시 최고 등급 자동)`,
+      `agents: 분석=${config.analysisAgent} / 구현=${config.improveAgent} / 검토=${config.reviewAgent}`,
+      `모델: 분석=${config.analysisModel || 'agent default'} / 구현=${config.improveModel || 'agent default'} / 검토=${config.reviewModel || 'agent default'}`,
+      `variant: 분석=${variantForRole(config, 'analyze')} / 구현=${variantForRole(config, 'improve')} / 검토=${variantForRole(config, 'review')} (미설정 시 최고 등급 자동)`,
       `수렴: ${config.threshold}생 연속 개선없음 또는 ${config.revertThreshold}생 연속 전체 리버트`,
       config.benchCommand
         ? `벤치마크: ${config.benchCommand} (before/after ${config.benchRuns}회 중앙값, 회귀 시 리버트)`

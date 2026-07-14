@@ -58,7 +58,7 @@ or quitting early, **knows when it has arrived.**
 flowchart TD
     A["◯ New life — fresh agent session, context = 0"] --> B{"1 · ANALYZE<br/>read-only · unbiased"}
     B -->|"no improvement"| C["no-improvement streak++"]
-    B -->|"BATCH PLAN of up to N"| D["2 · IMPROVE<br/>per item: back up → edit → checkpoint-verify → keep/revert"]
+    B -->|"BATCH PLAN of up to N"| D["2 · IMPROVE<br/>per item: fresh implement → fresh review → keep/revert"]
     D --> E["driver records the result in state.json"]
     C --> F{"converged?"}
     E --> F
@@ -70,12 +70,11 @@ flowchart TD
    cited by `file:line`, and produces a **BATCH PLAN** of up to `improvementBatchSize` **independently
    revertible** items. Then it writes a one-way `signal.json` to the driver. This phase **never** runs
    build/test/lint "to confirm" — that's the next phase's job.
-2. **IMPROVE** *(only when ANALYZE found something)* — works the plan **item by item** with implementation
-   parallelism forbidden. When the agent surface supports subagents, each item is handed to a fresh
-   sub-implementation session using the configured implementation model, then the driver/agent waits and
-   decides before starting the next item. It backs up the files it will touch, makes the smallest correct change,
-   then verifies in checkpoint groups. On a regression (or a
-   failing test/lint) it reverts **only that item** from its backup and keeps the good ones. A partial success
+2. **IMPROVE** *(only when ANALYZE found something)* — works the plan **item by item** with parallelism
+   forbidden. The driver starts a fresh implementation session for one item, then a separate fresh review
+   session that treats the implementation result as untrusted and independently reruns relevant checks and
+   benchmarks. Only the review verdict is final; the next item starts afterward. On a regression it reverts
+   **only that item** from its backup and keeps the good ones. A partial success
    is not a failure but the **correct, expected** outcome — it never rewrites everything in one sweep.
 3. **The driver** records the result, updates the streaks in `state.json`, and reincarnates again — until a
    stop condition is reached.
@@ -201,11 +200,13 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | Field | Meaning | Default |
 |---|---|---|
 | `agent` | `opencode` \| `codex` \| `claude` | `opencode` |
+| `analysisAgent` / `improveAgent` / `reviewAgent` | independently selected CLI for each role; omitted fields fall back through `agent`, while review first falls back to `improveAgent` | `agent` |
 | `model` | legacy shared `provider/model` fallback; empty = agent default | `""` |
-| `analysisModel` | model for ANALYZE; empty = `model`, then agent default | `""` |
-| `improveModel` | model for IMPROVE and per-item sub-implementation; empty = `model`, then agent default | `""` |
+| `analysisModel` | model for ANALYZE; empty = `model` when the CLI matches `agent`, otherwise that CLI's default | `""` |
+| `improveModel` | model for per-item implementation; empty = `model` when the CLI matches `agent`, otherwise that CLI's default | `""` |
+| `reviewModel` | model for independent review; empty = implementation/shared model only when the CLI matches, otherwise the review CLI's default | `""` |
 | `modelVariant` | shared reasoning tier; opencode `--variant` / Codex `model_reasoning_effort` / Claude Code `--effort`; empty = inferred top tier | `""` |
-| `analysisVariant` / `improveVariant` | per-phase reasoning tiers; empty = `modelVariant`, then inferred top tier | `""` |
+| `analysisVariant` / `improveVariant` / `reviewVariant` | role-specific reasoning tiers; same-CLI roles inherit implementation/shared values, while a different CLI infers its own top tier | `""` |
 | `agentProfile` | opencode `--agent` profile; empty = default | `""` |
 | `analysis` / `direction` / `completion` | the three intent prompts above | — (required) |
 | `threshold` | consecutive `no_improvements` lives until convergence | `5` |
@@ -247,10 +248,12 @@ so it never pollutes your repo:
 | `current.json` | This life's id / phase — the only hint given to the agent |
 | `signal.json` | One-way agent → driver signal, overwritten each phase |
 | `reports/NNNN-*.md` | Per-life analyze / improve reports |
+| `items/NNNN-<item>-<stage>-*` | Isolated current/signal/prompt artifacts for each implementation and review session |
 | `backups/NNNN/item-<id>/` | Per-item file backups — the source for IMPROVE reverts (not git) |
 | `ledger.md`, `history.jsonl` | Human-facing log / append-only machine log |
 | `summary.md` | Comprehensive report written when the loop ends |
 | `STOP` | Create this file to stop manually at the next boundary |
+| `HEAD_CHANGED.json` | Persistent quarantine after an agent changes Git HEAD; reruns stay blocked until the expected HEAD is restored or `retry-now reset` explicitly clears it |
 
 ---
 
@@ -275,12 +278,26 @@ appears immediately (see Install above).
 
 ## Safety model
 
-- **ANALYZE is strictly non-destructive** — it may read anything and run read-only observations, but never
-  edits or commits, and never runs build/test/lint "to confirm".
-- **Every IMPROVE item is backed up and reverted independently** — reverts deliberately don't use git, so
-  unrelated working-tree changes are never touched.
+- **ANALYZE is driver-enforced read-only** — the driver snapshots all Git-visible files and the raw Git
+  index before launch, restores and stops if ANALYZE mutates them, and persistently quarantines an
+  unauthorized commit without rewriting it.
+- **Every IMPROVE item is reviewed transactionally** — rejected items restore the last approved state. If
+  a later implementation/review ends in an ordinary failure or quota stop, the driver restores the entire
+  iteration-start snapshot so earlier unrecorded partial progress is not stranded.
 - **Regressions roll back automatically** — a failed checkpoint (test/lint) or a benchmark regression reverts
   just that item; the build is always left green.
+- **The transaction boundary is Git-visible state** — tracked and non-ignored untracked files, file modes,
+  symlinks, and the exact raw index bytes are preserved. Files ignored by Git are outside this boundary and
+  are not detected or restored; agent tools must not use ignored project files for mutable work.
+- **Submodules/gitlinks are rejected before agent launch** — repositories containing mode `160000` entries
+  cannot be snapshotted safely and the iteration stops before ANALYZE runs.
+- **Transactions cover Git-visible files** — tracked files and ordinary untracked files are restored byte-for-byte,
+  including modes, symlinks, and the raw Git index. Ignored files (for example `.env`, caches, and generated output)
+  are outside this guarantee and should be protected separately.
+- **Unexpected commits are quarantined, never reset automatically** — if an agent changes `HEAD`, retry-now stops
+  and blocks reruns until the expected revision is restored or `retry-now reset` explicitly accepts the current state.
+- **Interrupted batches roll back as one iteration** — if a later item crashes or exhausts quota, earlier reviewed
+  items from that unfinished batch are also restored so no unrecorded partial progress can be silently adopted.
 - **The loop is safe to run unattended** — `maxIterations` caps it, the `STOP` sentinel stops it cleanly, and
   commit-signing trouble falls back to `--no-gpg-sign` so a commit prompt can never wedge the loop.
 

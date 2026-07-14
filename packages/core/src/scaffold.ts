@@ -60,19 +60,20 @@ Runtime state for retry-now. **Everything here is git-ignored** by an inner ".gi
 
 **Project-local — no cross-project contention.** This folder belongs to THIS project alone; a driver only ever reads/writes here. Running retry-now on several projects at once is fine and expected — one \`bun\` driver process per project, each isolated in its own \`.retry-now/\`, so they NEVER contend. Do NOT kill "extra" driver processes just because you see several — they are different projects. Only a SECOND driver on the SAME project would contend, and \`driver.lock\` already prevents that (a stale lock left by a killed run is reclaimed automatically).
 
-Core rule: every iteration starts a fresh \`${config.agent}\` session with context reset to zero.
-Analyze model: \`${config.analysisModel || config.model || 'agent default'}\`. Improve model: \`${config.improveModel || config.model || 'agent default'}\`.
+Core rule: every agent invocation starts a fresh top-level session with context reset to zero.
+Agents: analyze=\`${config.analysisAgent}\`, implement=\`${config.improveAgent}\`, review=\`${config.reviewAgent}\`.
+Models: analyze=\`${config.analysisModel || config.model || 'agent default'}\`, implement=\`${config.improveModel || config.model || 'agent default'}\`, review=\`${config.reviewModel || config.improveModel || config.model || 'agent default'}\`.
 Only \`state.json\` carries driver-owned streaks across iterations. ANALYZE must not read prior reports, ledger, history, state, or old logs.
 
 Each ANALYZE phase plans up to \`${config.improvementBatchSize}\` independently revertible items in one unbiased pass.
-IMPROVE executes items sequentially with no implementation parallelism: one item, one fresh sub-implementation agent/session when available, backup -> edit -> verify -> keep/revert.
+IMPROVE executes items sequentially with no parallelism: fresh implementation session -> fresh independent review session -> reviewed keep/revert verdict -> next item.
 This amortizes one analysis across the batch while keeping each item benchmarkable and reportable. (\`improvementBatchSize = 1\` restores classic one-item behavior.)
 
 The loop converges after \`${config.threshold}\` consecutive \`no_improvements\` ANALYZE runs, or \`${config.revertThreshold}\` consecutive IMPROVE runs that keep zero items. Safety cap: \`maxIterations = ${config.maxIterations}\`.
 
 git commits: ${config.commitPerIteration ? '**on** — the driver creates one `retry-now#NNNN:` commit per iteration with `<applied>/<planned>` in the subject and per-item impact/evidence/rejection reasons in the body.' : '**off** — leave kept changes in the working tree.'}
 
-step1 ANALYZE is strictly read-only. step3 verification: ${verifyDesc}.
+step1 ANALYZE is driver-enforced read-only. The transaction snapshots Git-visible tracked and non-ignored untracked files plus exact raw index bytes. Git-ignored files are outside the transaction boundary and are not detected or restored. Repositories with submodules/gitlinks are rejected before agent launch. step3 verification: ${verifyDesc}.
 Benchmark: ${benchDesc}. A final \`summary.md\` is generated when the loop stops.
 
 ## Files
@@ -90,6 +91,7 @@ Benchmark: ${benchDesc}. A final \`summary.md\` is generated when the loop stops
 | \`backups/NNNN/\` | IMPROVE backups for item-level revert. |
 | \`logs/iter-NNNN-*.log\` | Raw agent stdout/stderr. |
 | \`STOP\` | Create to stop at the next boundary. |
+| \`HEAD_CHANGED.json\` | Persistent quarantine after an unauthorized agent commit. Restore the expected HEAD to auto-clear it, or run \`retry-now reset\` to clear it explicitly. |
 | \`driver.lock\` | Single-instance guard (pid). Prevents a 2nd driver on THIS project; a stale one is reclaimed. |
 
 ## Stop / resume / reset

@@ -168,14 +168,28 @@ test('normalizeSignal cleans a valid analyze signal and keeps a well-formed plan
     report: 'r',
     nextImprovement: 'first',
     plannedImprovements: [
-      { id: '1', title: 'a', risk: 'low' },
+      {
+        id: '1',
+        title: 'a',
+        risk: 'low',
+        targetFiles: ['src/a.ts', 42, '../escape.ts'],
+        approach: 'Replace the duplicate lookup.',
+        verification: 'Run bun test src/a.test.ts.',
+      },
       { id: '2', title: 'b', risk: 'bogus' }, // bad risk dropped, item kept
     ],
     summary: 's',
     timestamp: 't',
   })
   expect(sig?.plannedImprovements).toEqual([
-    { id: '1', title: 'a', risk: 'low' },
+    {
+      id: '1',
+      title: 'a',
+      risk: 'low',
+      targetFiles: ['src/a.ts'],
+      approach: 'Replace the duplicate lookup.',
+      verification: 'Run bun test src/a.test.ts.',
+    },
     { id: '2', title: 'b' },
   ])
 })

@@ -10,6 +10,10 @@ import { readFile } from 'node:fs/promises'
 import { resolvePaths } from './paths.ts'
 import type { AgentKind, RetryNowConfig } from './types.ts'
 
+export type RawRetryNowConfig = {
+  readonly [Key in keyof RetryNowConfig]?: unknown
+}
+
 export const AGENT_KINDS: readonly AgentKind[] = ['opencode', 'codex', 'claude']
 
 /** Type guard for `AgentKind`. Use at JSON/CLI boundaries instead of `as AgentKind`. */
@@ -38,12 +42,17 @@ export const MIN_QUOTA_POLL_MS = 1000
 export const DEFAULTS: RetryNowConfig = {
   version: 1,
   agent: 'opencode',
+  analysisAgent: 'opencode',
+  improveAgent: 'opencode',
+  reviewAgent: 'opencode',
   model: '',
   analysisModel: '',
   improveModel: '',
+  reviewModel: '',
   modelVariant: '',
   analysisVariant: '',
   improveVariant: '',
+  reviewVariant: '',
   agentProfile: '',
   analysis: '',
   direction: '',
@@ -89,15 +98,38 @@ function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
 }
 
-/** Normalise + validate raw input into a trustworthy config (throws on hard errors). */
-export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
-  const agentRaw = raw.agent ?? DEFAULTS.agent
-  if (!isAgentKind(agentRaw)) {
+function isRawRetryNowConfig(value: unknown): value is RawRetryNowConfig {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function normalizedAgent(
+  value: unknown,
+  fallback: AgentKind,
+  field: string,
+): AgentKind {
+  const candidate = value ?? fallback
+  if (!isAgentKind(candidate)) {
     throw new ConfigError(
-      `agent must be one of ${AGENT_KINDS.join(', ')} (got "${String(raw.agent)}")`,
+      `${field} must be one of ${AGENT_KINDS.join(', ')} (got "${String(value)}")`,
     )
   }
-  const agent: AgentKind = agentRaw
+  return candidate
+}
+
+/** Normalise + validate raw input into a trustworthy config (throws on hard errors). */
+export function normalizeConfig(raw: RawRetryNowConfig): RetryNowConfig {
+  const agent = normalizedAgent(raw.agent, DEFAULTS.agent, 'agent')
+  const analysisAgent = normalizedAgent(
+    raw.analysisAgent,
+    agent,
+    'analysisAgent',
+  )
+  const improveAgent = normalizedAgent(raw.improveAgent, agent, 'improveAgent')
+  const reviewAgent = normalizedAgent(
+    raw.reviewAgent,
+    improveAgent,
+    'reviewAgent',
+  )
 
   const analysis = str(raw.analysis, '').trim()
   const direction = str(raw.direction, '').trim()
@@ -131,18 +163,41 @@ export function normalizeConfig(raw: Partial<RetryNowConfig>): RetryNowConfig {
     MAX_IMPROVEMENT_BATCH_SIZE,
   )
 
+  const model = str(raw.model, '').trim()
+  const analysisModel =
+    str(raw.analysisModel, '').trim() || (analysisAgent === agent ? model : '')
+  const improveModel =
+    str(raw.improveModel, '').trim() || (improveAgent === agent ? model : '')
+  const reviewModel =
+    str(raw.reviewModel, '').trim() ||
+    (reviewAgent === improveAgent ? improveModel : '') ||
+    (reviewAgent === agent ? model : '')
+  const modelVariant = str(raw.modelVariant, '').trim()
+  const analysisVariant =
+    str(raw.analysisVariant, '').trim() ||
+    (analysisAgent === agent ? modelVariant : '')
+  const improveVariant =
+    str(raw.improveVariant, '').trim() ||
+    (improveAgent === agent ? modelVariant : '')
+  const reviewVariant =
+    str(raw.reviewVariant, '').trim() ||
+    (reviewAgent === improveAgent ? improveVariant : '') ||
+    (reviewAgent === agent ? modelVariant : '')
+
   return {
     version: 1,
     agent,
-    model: str(raw.model, '').trim(),
-    analysisModel: str(raw.analysisModel, str(raw.model, '')).trim(),
-    improveModel: str(raw.improveModel, str(raw.model, '')).trim(),
-    modelVariant: str(raw.modelVariant, '').trim(),
-    // Per-phase variants fall back to the shared `modelVariant` (exactly how `analysisModel`/
-    // `improveModel` fall back to `model` above), so a single shared variant still works while a
-    // provider-split loop can give each phase its own top tier (Anthropic `max` / OpenAI `xhigh`).
-    analysisVariant: str(raw.analysisVariant, str(raw.modelVariant, '')).trim(),
-    improveVariant: str(raw.improveVariant, str(raw.modelVariant, '')).trim(),
+    analysisAgent,
+    improveAgent,
+    reviewAgent,
+    model,
+    analysisModel,
+    improveModel,
+    reviewModel,
+    modelVariant,
+    analysisVariant,
+    improveVariant,
+    reviewVariant,
     agentProfile: str(raw.agentProfile, '').trim(),
     analysis,
     direction,
@@ -187,11 +242,12 @@ export async function loadConfig(root: string): Promise<RetryNowConfig | null> {
   } catch {
     return null // no config file on disk
   }
-  let raw: Partial<RetryNowConfig>
+  let raw: unknown
   try {
-    raw = JSON.parse(text) as Partial<RetryNowConfig>
+    raw = JSON.parse(text)
   } catch {
     return null // present but unparseable
   }
+  if (!isRawRetryNowConfig(raw)) return null
   return normalizeConfig(raw)
 }

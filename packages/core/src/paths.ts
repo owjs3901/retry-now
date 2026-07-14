@@ -5,7 +5,9 @@
  * one source of truth (and the opencode plugin, the CLI driver, and the agent prompts all
  * agree).
  */
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+
+import type { ImproveStage } from './types.ts'
 
 export const DIR = '.retry-now'
 
@@ -21,6 +23,7 @@ export interface Paths {
   readonly ledger: string
   readonly summary: string // final comprehensive loop report
   readonly stop: string // STOP sentinel
+  readonly headQuarantine: string // project-level unauthorized-HEAD quarantine
   readonly driverLock: string // single-instance guard (project-level, shared across targets)
   readonly readme: string
   readonly promptsDir: string
@@ -28,6 +31,16 @@ export interface Paths {
   readonly improvePrompt: string
   readonly reportsDir: string
   readonly logsDir: string
+}
+
+export interface ImproveItemPaths {
+  readonly key: string
+  readonly current: string
+  readonly signal: string
+  readonly prompt: string
+  readonly report: string
+  readonly log: string
+  readonly backupDir: string
 }
 
 /** Convert a target path to a filesystem-safe slug, e.g. "crates/vespera_core" -> "crates__vespera_core". */
@@ -54,6 +67,7 @@ export function resolvePaths(root: string, targetSlug?: string): Paths {
     analyzePrompt: join(stateDir, 'prompts', 'analyze.md'),
     improvePrompt: join(stateDir, 'prompts', 'improve.md'),
     stop: join(dir, 'STOP'),
+    headQuarantine: join(dir, 'HEAD_CHANGED.json'),
     driverLock: join(dir, 'driver.lock'),
     state: join(stateDir, 'state.json'),
     signal: join(stateDir, 'signal.json'),
@@ -69,4 +83,32 @@ export function resolvePaths(root: string, targetSlug?: string): Paths {
 /** zero-pad an iteration number to a 4-wide id, e.g. 12 -> "0012". */
 export function pad(iteration: number): string {
   return String(iteration).padStart(4, '0')
+}
+
+export function resolveImproveItemPaths(
+  paths: Paths,
+  iteration: number,
+  planIndex: number,
+  stage: ImproveStage,
+  itemId: string,
+): ImproveItemPaths {
+  const safeId = itemId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40) || 'item'
+  const itemNumber = String(planIndex + 1).padStart(2, '0')
+  const key = `${pad(iteration)}-${itemNumber}-${stage}-${safeId}`
+  const stateDir = dirname(paths.state)
+  const itemsDir = join(stateDir, 'items')
+  return {
+    key,
+    current: join(itemsDir, `${key}.current.json`),
+    signal: join(itemsDir, `${key}.signal.json`),
+    prompt: join(itemsDir, `${key}.prompt.md`),
+    report: join(paths.reportsDir, `${key}.md`),
+    log: join(paths.logsDir, `${key}.log`),
+    backupDir: join(
+      stateDir,
+      'backups',
+      pad(iteration),
+      `item-${itemNumber}-${safeId}`,
+    ),
+  }
 }

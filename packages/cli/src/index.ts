@@ -9,19 +9,23 @@
  *
  * Cross-agent: the same loop drives opencode / codex / claude code per `.retry-now/config.json`.
  */
-import { access, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   AGENT_LABEL,
+  agentForRole,
   BANNER,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
   loadConfig,
   type LoopState,
+  modelForRole,
   resolvePaths,
   runLoop,
   slugifyTarget,
+  variantForRole,
   VERSION,
 } from '@retry-now/core'
 
@@ -170,9 +174,14 @@ async function cmdStatus(cwd: string): Promise<number> {
   }
   const paths = resolvePaths(cwd)
   console.log(BANNER)
-  console.log(`agent      : ${AGENT_LABEL[config.agent]}`)
   console.log(
-    `models     : analyze=${config.analysisModel || config.model || 'agent default'} / improve=${config.improveModel || config.model || 'agent default'}`,
+    `agents     : analyze=${AGENT_LABEL[agentForRole(config, 'analyze')]} / improve=${AGENT_LABEL[agentForRole(config, 'improve')]} / review=${AGENT_LABEL[agentForRole(config, 'review')]}`,
+  )
+  console.log(
+    `models     : analyze=${modelForRole(config, 'analyze') || 'agent default'} / improve=${modelForRole(config, 'improve') || 'agent default'} / review=${modelForRole(config, 'review') || 'agent default'}`,
+  )
+  console.log(
+    `variants   : analyze=${variantForRole(config, 'analyze')} / improve=${variantForRole(config, 'improve')} / review=${variantForRole(config, 'review')}`,
   )
   console.log(`threshold  : ${config.threshold} 생 연속 개선없음이면 맺어짐`)
   console.log(
@@ -184,6 +193,10 @@ async function cmdStatus(cwd: string): Promise<number> {
   console.log(`max-iters  : ${config.maxIterations}`)
   if (await exists(paths.stop))
     console.log('STOP       : sentinel 존재 (다음 경계에서 정지)')
+  if (await exists(paths.headQuarantine))
+    console.log(
+      'HEAD       : unauthorized commit 격리 중 (HEAD 복원 또는 retry-now reset 필요)',
+    )
 
   if (config.targets.length === 0) {
     console.log('mode       : 전체 레포 단일 윤회')
@@ -221,8 +234,20 @@ async function cmdReset(cwd: string): Promise<number> {
     startedAt: now,
     updatedAt: now,
   }
-  await writeFile(paths.state, `${JSON.stringify(fresh, null, 2)}\n`, 'utf8')
+  const statePaths =
+    cfg && cfg.targets.length > 0
+      ? cfg.targets.map(
+          (target) => resolvePaths(cwd, slugifyTarget(target)).state,
+        )
+      : [paths.state]
+  await Promise.all(
+    statePaths.map(async (statePath) => {
+      await mkdir(dirname(statePath), { recursive: true })
+      await writeFile(statePath, `${JSON.stringify(fresh, null, 2)}\n`, 'utf8')
+    }),
+  )
   if (await exists(paths.stop)) await rm(paths.stop)
+  if (await exists(paths.headQuarantine)) await rm(paths.headQuarantine)
   console.log('윤회 카운터를 리셋했다. (config는 유지) 다시 `retry-now run`.')
   return 0
 }

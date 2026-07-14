@@ -57,17 +57,6 @@ export function buildFrontendBody(
   const runHow = RUN_HOW[agent]
   const runLine =
     agent === 'codex' ? driverCommand : `${driverCommand} $ARGUMENTS`
-  const variantSetting =
-    agent === 'codex'
-      ? 'Codex this is passed as `model_reasoning_effort`'
-      : agent === 'claude'
-        ? 'Claude Code this is passed as `--effort`'
-        : 'opencode this is passed as `--variant`'
-  const variantQuestion = `
-10. **Variant (추론 강도).** Which reasoning tier should every life use? For ${variantSetting}.
-    Empty means retry-now infers the highest tier for the selected model (for example \`xhigh\` or \`max\`).`
-  const modelVariantValue =
-    '"<answer 10 variant, or empty string for the inferred top tier>"'
   return `retry-now (지금 바로 윤회) — CONFIGURE (if needed) then RUN the autonomous improvement loop
 for THIS project. Talk to the user in their language.
 
@@ -112,11 +101,12 @@ follow-up only when a bench command exists.
    plans and applies as a batch (default 8, range 1..16). One fresh analysis is amortised over the
    whole batch — bigger = fewer iterations and less repeated analysis, but larger commits and more
    per-iteration work. \`1\` reproduces the classic one-change-per-iteration behaviour.
-9. **Model (모델).** Which model id (\`provider/model\`) should every life run on? New, stronger
-   models ship constantly, so ASK the user instead of assuming any specific one — and CENTER the
-   choices on the LATEST models: ${MODEL_DISCOVERY[agent]}, then offer the few newest/strongest
-   coding models as the options, newest first, with the strongest recommended as the default
-   answer. Empty means the agent's own default model.${variantQuestion}
+9. **Agents, models and variants (역할별 설정).** Configure all three roles independently:
+    ANALYZE, IMPLEMENT, and REVIEW each choose an agent CLI (\`opencode\` / \`codex\` / \`claude\`),
+    a model id, and a variant. The REVIEW role is an independent fresh session whose verdict gates
+    the next item. New models ship constantly, so ASK instead of assuming one. For this frontend,
+    ${MODEL_DISCOVERY[agent]}; for another selected CLI, ask for its model id. Empty model means that
+    CLI's default; empty variant means retry-now infers the highest tier.
 
 The loop ALWAYS also hunts and removes **duplicate code** and **dead/unused code** every iteration,
 regardless of the analysis answer — that is baked into the generated prompts, so you need not ask.
@@ -129,9 +119,18 @@ Detect those test / lint / benchmark commands like so — Rust → \`cargo test\
 \`\`\`json
 {
   "version": 1,
-  "agent": "${agent}",
-  "model": "<answer 9 provider/model id, or empty string for the agent default>",
-  "modelVariant": ${modelVariantValue},
+  "agent": "<answer 9 ANALYZE agent; legacy fallback>",
+  "analysisAgent": "<answer 9 ANALYZE agent>",
+  "improveAgent": "<answer 9 IMPLEMENT agent>",
+  "reviewAgent": "<answer 9 REVIEW agent>",
+  "model": "",
+  "analysisModel": "<answer 9 ANALYZE model, or empty>",
+  "improveModel": "<answer 9 IMPLEMENT model, or empty>",
+  "reviewModel": "<answer 9 REVIEW model, or empty>",
+  "modelVariant": "",
+  "analysisVariant": "<answer 9 ANALYZE variant, or empty>",
+  "improveVariant": "<answer 9 IMPLEMENT variant, or empty>",
+  "reviewVariant": "<answer 9 REVIEW variant, or empty>",
   "agentProfile": "",
   "analysis": "<answer 2>",
   "direction": "<answer 3>",
