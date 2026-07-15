@@ -55,8 +55,16 @@ export async function guardAnalyzeRepository(
   const after = await repository.capture(root)
   if (after !== null && !snapshotChanged(before, after))
     return { kind: 'clean' }
-  const issue = await repository.restore(root, before)
-  return issue === null ? { kind: 'restored' } : { kind: 'failed', issue }
+  try {
+    const issue = await repository.restore(root, before)
+    return issue === null ? { kind: 'restored' } : { kind: 'failed', issue }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      kind: 'failed',
+      issue: `repository restoration threw: ${message}`,
+    }
+  }
 }
 
 export async function rollbackIterationRepository(
@@ -67,5 +75,10 @@ export async function rollbackIterationRepository(
     'restore'
   > = DEFAULT_REPOSITORY_TRANSACTION,
 ): Promise<string | null> {
-  return repository.restore(root, before)
+  try {
+    return await repository.restore(root, before)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return `repository restoration threw: ${message}`
+  }
 }

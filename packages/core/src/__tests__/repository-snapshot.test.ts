@@ -401,6 +401,22 @@ test('restore reports filesystem failures', async () => {
   ).toBe('could not restore approved file content: locked file')
 })
 
+test('restore converts a non-Error index restoration failure into a message instead of throwing', async () => {
+  const approved: RepositorySnapshot = {
+    head: HEAD,
+    indexTree: INDEX,
+    indexFile: INDEX_FILE,
+    entries: new Map(),
+  }
+  const files = fakeFiles({
+    writeFile: () => Promise.reject('not an Error instance'),
+  })
+
+  expect(
+    await restoreRepositorySnapshot(ROOT, approved, fakeGit(), files),
+  ).toBe('could not restore the approved Git index: not an Error instance')
+})
+
 test('restore rejects a mismatched verification snapshot', async () => {
   let indexReads = 0
   const approved: RepositorySnapshot = {
