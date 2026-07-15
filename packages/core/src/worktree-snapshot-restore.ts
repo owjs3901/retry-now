@@ -72,7 +72,16 @@ export async function restoreRepositorySnapshot(
     )
   }
 
-  const indexIssue = await restoreRepositoryIndex(root, snapshot, git, files)
+  // restoreRepositoryIndex already converts ordinary fs failures into a returned message; this
+  // guards the residual case where it re-throws (a genuinely unexpected non-Error rejection),
+  // so this function keeps its `Promise<string | null>` contract instead of ever throwing.
+  let indexIssue: string | null
+  try {
+    indexIssue = await restoreRepositoryIndex(root, snapshot, git, files)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return `could not restore the approved Git index: ${message}`
+  }
   if (indexIssue !== null) return indexIssue
 
   const paths = new Set([...snapshot.entries.keys(), ...currentEntries.keys()])

@@ -389,10 +389,62 @@ test('validateImproveSignal rejects mismatched totals, ids, and rolled-up result
       },
       plan,
     ),
-  ).toContain('plan id/title')
+  ).toContain('plan id')
   expect(
     validateImproveSignal({ ...valid, result: 'applied_reverted' }, plan),
   ).toContain('result')
+})
+
+test('validateImproveSignal accepts a reworded title as long as the id matches', () => {
+  // Two independent, context-0 LLM sessions cannot be trusted to echo a free-text title back
+  // byte-for-byte; only the short structural id is required to match the authoritative plan.
+  const plan: readonly PlannedImprovement[] = [
+    { id: '1', title: 'Make changepack log paths cross-platform' },
+  ]
+  const sig = improveSignal({
+    plannedCount: 1,
+    appliedImprovements: [
+      {
+        id: '1',
+        title: 'Made changepack logging paths work on Windows too', // reworded, not verbatim
+        status: 'kept',
+        impact: 'paths resolve correctly on Windows',
+        decisionReason: 'verified on a Windows checkout',
+        files: ['src/changepack.ts'],
+      },
+    ],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+  })
+
+  expect(validateImproveSignal(sig, plan)).toBeNull()
+})
+
+test('validateImproveSignal still rejects an outcome id absent from the analyze plan', () => {
+  const plan: readonly PlannedImprovement[] = [{ id: '1', title: 'first' }]
+  const sig = improveSignal({
+    plannedCount: 1,
+    appliedImprovements: [
+      {
+        id: '9', // not in plan
+        title: 'anything',
+        status: 'kept',
+        impact: 'faster',
+        decisionReason: 'benchmark improved',
+        files: ['src/first.ts'],
+      },
+    ],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+  })
+
+  expect(validateImproveSignal(sig, plan)).toContain(
+    'must match one unique analyze plan id',
+  )
 })
 
 test('normalizeSignal drops non-numeric / negative counts but keeps valid ones', () => {

@@ -109,6 +109,11 @@ test('ANALYZE guard distinguishes clean, unavailable, and failed restore states'
       capture: () => Promise.resolve(null),
       restore: () => Promise.resolve('locked repository'),
     }
+    const throwingRestoreRepository = {
+      ...cleanRepository,
+      capture: () => Promise.resolve(null),
+      restore: () => Promise.reject(new Error('disk unavailable')),
+    }
 
     expect(
       await guardAnalyzeRepository(root, snapshot, cleanRepository),
@@ -122,6 +127,29 @@ test('ANALYZE guard distinguishes clean, unavailable, and failed restore states'
     expect(
       await guardAnalyzeRepository(root, snapshot, failedRestoreRepository),
     ).toEqual({ kind: 'failed', issue: 'locked repository' })
+    expect(
+      await guardAnalyzeRepository(root, snapshot, throwingRestoreRepository),
+    ).toEqual({
+      kind: 'failed',
+      issue: 'repository restoration threw: disk unavailable',
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('rollbackIterationRepository reports a thrown restore instead of throwing', async () => {
+  const root = await initRepo({ 'src/value.ts': 'base\n' })
+  try {
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+
+    expect(
+      await rollbackIterationRepository(root, snapshot, {
+        restore: () => Promise.reject(new Error('disk unavailable')),
+      }),
+    ).toBe('repository restoration threw: disk unavailable')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

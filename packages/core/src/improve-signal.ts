@@ -15,11 +15,15 @@ export function validateImproveSignal(
     return 'plannedCount must equal the authoritative analyze plan length'
   }
 
-  const plannedById = new Map(planned.map((item) => [item.id, item.title]))
+  // Matched by id only: a fresh, context-0 IMPROVE session reads the plan's title as prose to
+  // act on, not a literal string it must echo back byte-for-byte, so exact-title equality here
+  // would reject correct work over a harmless rewording. `id` is a short structural token
+  // ("1", "2"…) that LLMs reproduce reliably across independent sessions.
+  const plannedIds = new Set(planned.map((item) => item.id))
   const seen = new Set<string>()
   for (const item of outcomes) {
-    if (seen.has(item.id) || plannedById.get(item.id) !== item.title) {
-      return 'every outcome must match one unique analyze plan id/title'
+    if (seen.has(item.id) || !plannedIds.has(item.id)) {
+      return 'every outcome must match one unique analyze plan id'
     }
     seen.add(item.id)
     if (!item.impact?.trim()) return `item ${item.id} must report impact`

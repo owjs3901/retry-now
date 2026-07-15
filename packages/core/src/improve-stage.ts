@@ -54,10 +54,17 @@ export function createImproveStageExecutor(
 
   async function restoreApproved(run: ItemStageRun): Promise<boolean> {
     if (approvedSnapshot === null) return false
-    const issue = await repository.restoreSnapshot(
-      input.paths.root,
-      approvedSnapshot,
-    )
+    let issue: string | null
+    try {
+      issue = await repository.restoreSnapshot(
+        input.paths.root,
+        approvedSnapshot,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      input.log(`  ! item ${run.item.id} rollback threw — ${message}`)
+      return false
+    }
     if (issue === null) {
       stageSnapshot = approvedSnapshot
       return true
@@ -103,12 +110,35 @@ export function createImproveStageExecutor(
         const current = await repository.capture(input.paths.root)
         if (current === null)
           return 'current repository snapshot is unavailable'
-        if (current.indexTree !== before.indexTree)
-          return 'stage changed Git index'
+
+        const indexChanged = current.indexTree !== before.indexTree
         const changed = repositoryDelta(before, current)
-        return changed.length === 0
-          ? null
-          : `stage changed files before retry: ${changed.join(', ')}`
+        if (!indexChanged && changed.length === 0) return null
+
+        // A failed attempt's own writes are recoverable: this driver holds the exact
+        // pre-stage snapshot and a proven restore primitive, so undo them and let the next
+        // fresh session start clean instead of sacrificing the whole item (and its
+        // PHASE_ATTEMPTS retry budget) over dirt that is safe to discard.
+        let restoreIssue: string | null
+        try {
+          restoreIssue = await repository.restoreSnapshot(
+            input.paths.root,
+            before,
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return `repository restoration threw before retry: ${message}`
+        }
+        if (restoreIssue !== null) {
+          return `could not restore repository before retry: ${restoreIssue}`
+        }
+        const dirt = [...(indexChanged ? ['Git index'] : []), ...changed].join(
+          ', ',
+        )
+        input.log(
+          `  ! item ${run.item.id} ${run.stage} restored attempt changes before retry: ${dirt}`,
+        )
+        return null
       },
       run,
     )
@@ -128,7 +158,15 @@ export function createImproveStageExecutor(
       return (await restoreApproved(run)) ? outcome : { kind: 'failed' }
     }
 
-    const indexIssue = await repository.restoreIndex(input.paths.root, before)
+    let indexIssue: string | null
+    try {
+      indexIssue = await repository.restoreIndex(input.paths.root, before)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      input.log(`  ! item ${run.item.id} index restoration threw — ${message}`)
+      await restoreApproved(run)
+      return { kind: 'failed' }
+    }
     if (indexIssue !== null) {
       input.log(
         `  ! item ${run.item.id} index restoration failed — ${indexIssue}`,
