@@ -18,9 +18,9 @@
   "devDependencies": {
     "@types/bun": "latest",
     "dts-bundle-generator": "^9.5.1",
-    "eslint-plugin-devup": "^2.0.19",
-    "oxlint": "^1.72.0",
-    "typescript": "^6.0.3"
+    "eslint-plugin-devup": "^2.0.20",
+    "oxlint": "^1.74.0",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "bun": ">=1.1.0"
