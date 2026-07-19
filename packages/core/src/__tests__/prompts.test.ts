@@ -54,6 +54,7 @@ function cfg(overrides: Partial<RetryNowConfig> = {}): RetryNowConfig {
     quotaPollMs: 900000,
     maxQuotaWaitMs: 21600000,
     targets: [],
+    phaseTimeoutMs: 1_800_000,
     ...overrides,
   }
 }

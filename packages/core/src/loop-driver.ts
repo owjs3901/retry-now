@@ -18,6 +18,11 @@ import { createWriteStream } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import type {
+  AgentBackend,
+  PhaseInvocationRequest,
+  PhaseRunResult,
+} from './agent-backend.ts'
 import {
   AGENT_LABEL,
   agentForRole,
@@ -83,6 +88,10 @@ import type {
   Signal,
 } from './types.ts'
 
+type ResolvedDriverOptions = DriverOptions & {
+  readonly backend: AgentBackend
+}
+
 function composeMessage(
   iter: number,
   phase: Phase,
@@ -135,6 +144,35 @@ export function runAgent(
       finish(code ?? -1)
     })
   })
+}
+
+/** Existing subprocess execution path, exposed as the default AgentBackend implementation. */
+export class CliSpawnBackend implements AgentBackend {
+  async run(request: PhaseInvocationRequest): Promise<PhaseRunResult> {
+    const { cmd, args } = buildAgentCommand(
+      request.config,
+      request.message,
+      request.role,
+    )
+    request.log(
+      `  ↳ ${AGENT_LABEL[agentForRole(request.config, request.role)]} ${request.stage ?? request.phase} (${request.model || 'agent default'}, fresh session)…`,
+    )
+    const code = await runAgent(
+      cmd,
+      args,
+      request.cwd,
+      request.logPath,
+      request.log,
+    )
+    if (code !== 0) {
+      request.log(`  ! agent exited with code ${code} (see ${request.logPath})`)
+    }
+    return { kind: 'exit', code }
+  }
+}
+
+export function createCliSpawnBackend(): AgentBackend {
+  return new CliSpawnBackend()
 }
 
 /** Synthetic signal used by --dry-run to exercise the full control flow without an agent. */
@@ -195,6 +233,7 @@ type PhaseInvocation = {
   readonly message: string
   readonly logPath: string
   readonly item?: PlannedImprovement
+  readonly itemIndex?: number
   readonly stage?: ImproveStage
   readonly reportPath?: string
 }
@@ -204,12 +243,15 @@ async function runPhase(
   config: RetryNowConfig,
   iter: number,
   phase: Phase,
-  opts: DriverOptions,
+  opts: ResolvedDriverOptions,
   log: (line: string) => void,
   stateDirRel: string,
   scope: string,
   invocation?: PhaseInvocation,
-): Promise<Signal | null> {
+): Promise<{
+  readonly result: PhaseRunResult
+  readonly signal: Signal | null
+}> {
   await beginPhase(
     paths,
     iter,
@@ -220,6 +262,7 @@ async function runPhase(
       : undefined,
   )
 
+  let result: PhaseRunResult
   if (opts.dryRun) {
     const synthetic = synthSignal(
       iter,
@@ -236,25 +279,40 @@ async function runPhase(
     }
     if (invocation?.logPath) await writeText(invocation.logPath, '')
     await writeJson(paths.signal, synthetic)
+    result = { kind: 'exit', code: 0 }
   } else {
     const role = invocation?.role ?? phase
-    const { cmd, args } = buildAgentCommand(
-      config,
-      invocation?.message ?? composeMessage(iter, phase, stateDirRel, scope),
-      role,
-    )
     const logPath =
       invocation?.logPath ??
       join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
-    const model = modelForRole(config, role) || 'agent default'
-    log(
-      `  ↳ ${AGENT_LABEL[agentForRole(config, role)]} ${invocation?.stage ?? phase} (${model}, fresh session)…`,
-    )
-    const code = await runAgent(cmd, args, paths.root, logPath, log)
-    if (code !== 0) log(`  ! agent exited with code ${code} (see ${logPath})`)
+    result = await opts.backend.run({
+      message:
+        invocation?.message ?? composeMessage(iter, phase, stateDirRel, scope),
+      role,
+      title:
+        invocation?.item && invocation.stage
+          ? `retry-now #${pad(iter)} IMPROVE item ${invocation.item.id} ${invocation.stage}`
+          : `retry-now #${pad(iter)} ${phase.toUpperCase()}`,
+      config,
+      logPath,
+      cwd: paths.root,
+      model: modelForRole(config, role),
+      iteration: iter,
+      phase,
+      timeoutMs: config.phaseTimeoutMs,
+      ...(invocation?.stage === undefined ? {} : { stage: invocation.stage }),
+      ...(invocation?.item === undefined ? {} : { item: invocation.item }),
+      ...(invocation?.itemIndex === undefined
+        ? {}
+        : { itemIndex: invocation.itemIndex }),
+      ...(invocation?.reportPath === undefined
+        ? {}
+        : { reportPath: invocation.reportPath }),
+      log,
+    })
   }
 
-  return readSignal(paths, iter, phase)
+  return { result, signal: await readSignal(paths, iter, phase) }
 }
 
 const PHASE_ATTEMPTS = 3
@@ -294,6 +352,7 @@ function logCrashGuidance(
 type PhaseOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota' }
+  | { readonly kind: 'aborted' }
   | { readonly kind: 'failed' }
 
 /** Compact human duration for wait/pause logs: 90000 -> "2m", 21600000 -> "6.0h". */
@@ -369,7 +428,7 @@ async function headQuarantineReason(paths: Paths): Promise<string | null> {
 /** Apply the terminal status + guidance for a non-`ok` phase outcome (quota pause vs crash). */
 function handlePhaseStop(
   state: LoopState,
-  kind: 'quota' | 'failed',
+  kind: 'quota' | 'aborted' | 'failed',
   label: string,
   iter: number,
   phase: Phase,
@@ -377,6 +436,11 @@ function handlePhaseStop(
   paths: Paths,
   log: (line: string) => void,
 ): void {
+  if (kind === 'aborted') {
+    log(`[${label}][${iter}] ${phase}: 실행 중단 → stopped-manual 정지.`)
+    state.status = 'stopped-manual'
+    return
+  }
   if (kind === 'quota') {
     log(
       `[${label}][${iter}] ${phase}: 모든 계정 쿼터 소진 → paused-quota 정지(쿼터가 차면 재실행으로 재개).`,
@@ -392,6 +456,13 @@ function handlePhaseStop(
   state.status = 'error'
 }
 
+function formatAnalyzeChanges(changed: readonly string[]): string {
+  if (changed.length === 0) return '(알 수 없음)'
+  const shown = changed.slice(0, 10).join(', ')
+  const remaining = changed.length - 10
+  return remaining > 0 ? `${shown} 외 ${remaining}개` : shown
+}
+
 /**
  * Run a phase, classifying a no-signal run into three outcomes (see `PhaseOutcome`). A crash is
  * retried in a fresh session (each life is context-0, so a retry is always safe). An
@@ -405,7 +476,7 @@ async function runPhaseResilient(
   config: RetryNowConfig,
   iter: number,
   phase: Phase,
-  opts: DriverOptions,
+  opts: ResolvedDriverOptions,
   log: (line: string) => void,
   stateDirRel: string,
   scope: string,
@@ -419,7 +490,7 @@ async function runPhaseResilient(
   let attempt = 0
   while (attempt < PHASE_ATTEMPTS) {
     attempt++
-    const sig = await runPhase(
+    const execution = await runPhase(
       paths,
       config,
       iter,
@@ -430,9 +501,10 @@ async function runPhaseResilient(
       scope,
       invocation,
     )
-    if (sig) {
-      const issue = validate?.(sig) ?? null
-      if (issue === null) return { kind: 'ok', signal: sig }
+    if (execution.result.kind === 'aborted') return { kind: 'aborted' }
+    if (execution.result.kind !== 'quota' && execution.signal) {
+      const issue = validate?.(execution.signal) ?? null
+      if (issue === null) return { kind: 'ok', signal: execution.signal }
       log(
         `  ! ${phase}: invalid structured signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — ${issue}`,
       )
@@ -440,7 +512,10 @@ async function runPhaseResilient(
 
     // A no-signal run looks like a crash by exit code, but an out-of-quota wall needs the
     // opposite handling. Check the agent's own log for a rate-limit / quota error shape.
-    if (!opts.dryRun && (await quotaExhaustedInLog(logPath))) {
+    if (
+      execution.result.kind === 'quota' ||
+      (!opts.dryRun && (await quotaExhaustedInLog(logPath)))
+    ) {
       if (!opts.waitForQuota) return { kind: 'quota' }
       if (await exists(paths.stop)) return { kind: 'quota' }
       if (Date.now() >= waitDeadline) {
@@ -798,7 +873,7 @@ async function runOneLoop(
   root: string,
   target: string | null,
   config: RetryNowConfig,
-  opts: DriverOptions,
+  opts: ResolvedDriverOptions,
   log: (line: string) => void,
 ): Promise<DriverResult> {
   const slug = target !== null ? slugifyTarget(target) : undefined
@@ -915,7 +990,7 @@ async function runOneLoop(
         state.status = 'error'
         log(
           analyzeGuard.kind === 'restored'
-            ? `[${label}][${iter}] ANALYZE가 저장소를 변경하여 시작 상태로 복원하고 중단했습니다.`
+            ? `[${label}][${iter}] ANALYZE가 저장소를 변경하여 시작 상태로 복원하고 중단했습니다. — 변경: ${formatAnalyzeChanges(analyzeGuard.changed)}`
             : `[${label}][${iter}] ANALYZE 변경 복원 실패 — ${analyzeGuard.issue}`,
         )
         break
@@ -1009,6 +1084,7 @@ async function runOneLoop(
             message: run.message,
             logPath: run.artifacts.log,
             item: run.item,
+            itemIndex: run.itemIndex,
             stage: run.stage,
             reportPath: run.artifacts.report,
           },
@@ -1146,6 +1222,10 @@ export async function runLoop(
   opts: DriverOptions,
 ): Promise<DriverResult> {
   const log = opts.log ?? ((line: string) => console.log(line))
+  const resolvedOpts: ResolvedDriverOptions = {
+    ...opts,
+    backend: opts.backend ?? createCliSpawnBackend(),
+  }
   const paths = resolvePaths(opts.cwd)
   // Materialise .retry-now/ first (the lock file lives inside it), then take the project-local lock.
   await scaffold(opts.cwd, config, false)
@@ -1165,7 +1245,7 @@ export async function runLoop(
     }
   }
   try {
-    return await runLoopBody(config, opts, log)
+    return await runLoopBody(config, resolvedOpts, log)
   } finally {
     await releaseDriverLock(paths.driverLock)
   }
@@ -1173,7 +1253,7 @@ export async function runLoop(
 
 async function runLoopBody(
   config: RetryNowConfig,
-  opts: DriverOptions,
+  opts: ResolvedDriverOptions,
   log: (line: string) => void,
 ): Promise<DriverResult> {
   log(BANNER)
@@ -1234,6 +1314,7 @@ async function runLoopBody(
 
 export interface RunProjectOptions {
   readonly dryRun?: boolean
+  readonly backend?: AgentBackend
   /** override config.commitPerIteration for this run only */
   readonly commitOverride?: boolean
   /** override config.waitForQuota for this run only (`--wait-for-quota` / `--no-wait-for-quota`) */
@@ -1258,6 +1339,7 @@ export async function runProjectLoop(
     cwd,
     dryRun: opts.dryRun ?? false,
     waitForQuota: opts.waitForQuotaOverride ?? config.waitForQuota,
+    ...(opts.backend === undefined ? {} : { backend: opts.backend }),
   })
 }
 
@@ -1265,7 +1347,10 @@ export async function runProjectLoop(
  * Shared driver CLI: parse `--cwd <path> --dry-run --commit|--no-commit`, run the project loop,
  * and resolve a process exit code. Every agent frontend's driver entry is a thin shim over this.
  */
-export async function runDriverCli(argv: readonly string[]): Promise<number> {
+export async function runDriverCli(
+  argv: readonly string[],
+  backend?: AgentBackend,
+): Promise<number> {
   const i = argv.indexOf('--cwd')
   const cwd = i >= 0 ? (argv[i + 1] ?? process.cwd()) : process.cwd()
   const dryRun = argv.includes('--dry-run')
@@ -1283,6 +1368,7 @@ export async function runDriverCli(argv: readonly string[]): Promise<number> {
     dryRun,
     ...(commitOverride === undefined ? {} : { commitOverride }),
     ...(waitForQuotaOverride === undefined ? {} : { waitForQuotaOverride }),
+    ...(backend === undefined ? {} : { backend }),
   })
   if (!result) {
     console.error(

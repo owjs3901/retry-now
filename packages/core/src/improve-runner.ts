@@ -20,6 +20,7 @@ import type {
 export type ItemStageOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota' }
+  | { readonly kind: 'aborted' }
   | { readonly kind: 'failed' }
   | {
       readonly kind: 'head-changed'
@@ -50,6 +51,7 @@ type ImproveBatchInput = {
 export type ImproveBatchOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota'; readonly stage: ImproveStage }
+  | { readonly kind: 'aborted'; readonly stage: ImproveStage }
   | { readonly kind: 'failed'; readonly stage: ImproveStage }
   | {
       readonly kind: 'head-changed'

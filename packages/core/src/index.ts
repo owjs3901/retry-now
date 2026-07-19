@@ -6,6 +6,11 @@
  * no-improvement streak; the loop ends when the improvement is 맺어진다 (converged).
  */
 
+export type {
+  AgentBackend,
+  PhaseInvocationRequest,
+  PhaseRunResult,
+} from './agent-backend.ts'
 export {
   AGENT_LABEL,
   type AgentCommand,
@@ -33,6 +38,7 @@ export {
 export {
   buildFrontend,
   buildFrontendBody,
+  buildPluginCommandFile,
   type FrontendFile,
   type FrontendInstallResult,
   installFrontend,
@@ -58,6 +64,8 @@ export {
   releaseDriverLock,
 } from './lock.ts'
 export {
+  CliSpawnBackend,
+  createCliSpawnBackend,
   type DriverResult,
   runDriverCli,
   runLoop,

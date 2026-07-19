@@ -20,7 +20,7 @@ const DEFAULT_REPOSITORY_TRANSACTION = {
 
 export type AnalyzeRepositoryOutcome =
   | { readonly kind: 'clean' }
-  | { readonly kind: 'restored' }
+  | { readonly kind: 'restored'; readonly changed: readonly string[] }
   | {
       readonly kind: 'head-changed'
       readonly expectedHead: string
@@ -28,16 +28,18 @@ export type AnalyzeRepositoryOutcome =
     }
   | { readonly kind: 'failed'; readonly issue: string }
 
-function snapshotChanged(
+function snapshotChanges(
   before: RepositorySnapshot,
   after: RepositorySnapshot,
-): boolean {
-  return (
-    before.head !== after.head ||
+): string[] {
+  const changed = repositoryDelta(before, after)
+  if (
     before.indexTree !== after.indexTree ||
-    !before.indexFile.equals(after.indexFile) ||
-    repositoryDelta(before, after).length > 0
-  )
+    !before.indexFile.equals(after.indexFile)
+  ) {
+    changed.unshift('Git index')
+  }
+  return changed
 }
 
 export async function guardAnalyzeRepository(
@@ -53,11 +55,13 @@ export async function guardAnalyzeRepository(
     return { kind: 'head-changed', expectedHead: before.head, actualHead }
   }
   const after = await repository.capture(root)
-  if (after !== null && !snapshotChanged(before, after))
-    return { kind: 'clean' }
+  const changed = after === null ? [] : snapshotChanges(before, after)
+  if (after !== null && changed.length === 0) return { kind: 'clean' }
   try {
     const issue = await repository.restore(root, before)
-    return issue === null ? { kind: 'restored' } : { kind: 'failed', issue }
+    return issue === null
+      ? { kind: 'restored', changed }
+      : { kind: 'failed', issue }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return {

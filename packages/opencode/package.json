@@ -27,7 +27,7 @@
     "@retry-now/core": "workspace:*"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.1"
+    "@opencode-ai/plugin": ">=1.18.3"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "latest"

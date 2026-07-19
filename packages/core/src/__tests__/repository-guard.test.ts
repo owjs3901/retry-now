@@ -9,7 +9,10 @@ import {
   guardAnalyzeRepository,
   rollbackIterationRepository,
 } from '../repository-guard.ts'
-import { captureRepositorySnapshot } from '../repository-snapshot.ts'
+import {
+  captureRepositorySnapshot,
+  restoreRepositorySnapshot,
+} from '../repository-snapshot.ts'
 
 async function initRepo(
   files: Readonly<Record<string, string>>,
@@ -40,9 +43,57 @@ test('ANALYZE mutation is restored to its Git-visible starting snapshot', async 
 
     expect(await guardAnalyzeRepository(root, snapshot)).toEqual({
       kind: 'restored',
+      changed: ['src/new.ts', 'src/value.ts'],
     })
     expect(await readFile(join(root, 'src/value.ts'), 'utf8')).toBe('base\n')
     expect(await Bun.file(join(root, 'src/new.ts')).exists()).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('untracked host-agent state is omitted, ignored by ANALYZE, and preserved by restore', async () => {
+  const root = await initRepo({ 'src/value.ts': 'base\n' })
+  try {
+    const before = await captureRepositorySnapshot(root)
+    expect(before).not.toBeNull()
+    if (before === null) return
+    const continuation = join(root, '.omo/run-continuation/x.json')
+    const sisyphus = join(root, '.sisyphus/foo')
+    await mkdir(dirname(continuation), { recursive: true })
+    await mkdir(dirname(sisyphus), { recursive: true })
+    await writeFile(continuation, '{}\n')
+    await writeFile(sisyphus, 'runtime state\n')
+
+    const after = await captureRepositorySnapshot(root)
+    expect(after?.entries.has('.omo/run-continuation/x.json')).toBe(false)
+    expect(after?.entries.has('.sisyphus/foo')).toBe(false)
+    expect(await guardAnalyzeRepository(root, before)).toEqual({
+      kind: 'clean',
+    })
+    expect(await restoreRepositorySnapshot(root, before)).toBeNull()
+    expect(await readFile(continuation, 'utf8')).toBe('{}\n')
+    expect(await readFile(sisyphus, 'utf8')).toBe('runtime state\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('tracked .omo files remain protected and report their changed path', async () => {
+  const root = await initRepo({ '.omo/plans/p.md': 'approved\n' })
+  try {
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    await writeFile(join(root, '.omo/plans/p.md'), 'changed\n')
+
+    expect(await guardAnalyzeRepository(root, snapshot)).toEqual({
+      kind: 'restored',
+      changed: ['.omo/plans/p.md'],
+    })
+    expect(await readFile(join(root, '.omo/plans/p.md'), 'utf8')).toBe(
+      'approved\n',
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -114,6 +165,11 @@ test('ANALYZE guard distinguishes clean, unavailable, and failed restore states'
       capture: () => Promise.resolve(null),
       restore: () => Promise.reject(new Error('disk unavailable')),
     }
+    const changedIndexRepository = {
+      ...cleanRepository,
+      capture: () =>
+        Promise.resolve({ ...snapshot, indexTree: 'changed-index-tree' }),
+    }
 
     expect(
       await guardAnalyzeRepository(root, snapshot, cleanRepository),
@@ -133,6 +189,9 @@ test('ANALYZE guard distinguishes clean, unavailable, and failed restore states'
       kind: 'failed',
       issue: 'repository restoration threw: disk unavailable',
     })
+    expect(
+      await guardAnalyzeRepository(root, snapshot, changedIndexRepository),
+    ).toEqual({ kind: 'restored', changed: ['Git index'] })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

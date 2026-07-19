@@ -38,6 +38,7 @@ function config(): RetryNowConfig {
     quotaPollMs: 1_000,
     maxQuotaWaitMs: 10_000,
     targets: [],
+    phaseTimeoutMs: 1_800_000,
   }
 }
 

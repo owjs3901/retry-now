@@ -20,6 +20,7 @@ import {
   gitIndexPath,
   gitVisiblePaths,
   indexTree,
+  isAgentStatePath,
 } from './worktree-snapshot-git.ts'
 
 export async function restoreRepositoryIndex(
@@ -87,18 +88,10 @@ export async function restoreRepositorySnapshot(
   const paths = new Set([...snapshot.entries.keys(), ...currentEntries.keys()])
   try {
     for (const path of paths) {
-      if (
-        !snapshotEntriesEqual(
-          snapshot.entries.get(path),
-          currentEntries.get(path),
-        )
-      ) {
-        await restoreSnapshotEntry(
-          root,
-          path,
-          snapshot.entries.get(path),
-          files,
-        )
+      const snapshotEntry = snapshot.entries.get(path)
+      if (snapshotEntry === undefined && isAgentStatePath(path)) continue
+      if (!snapshotEntriesEqual(snapshotEntry, currentEntries.get(path))) {
+        await restoreSnapshotEntry(root, path, snapshotEntry, files)
       }
     }
   } catch (error) {

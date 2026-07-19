@@ -14,41 +14,36 @@
  * earliest point, before any command-directory scan runs — so `/retry-now` appears
  * on the same launch.
  *
- * The bundled driver path is baked into the file, so no global CLI install is
- * needed. The file is a personal/global command (no `--cwd`), so `/retry-now` runs
- * in whichever project opencode is open in. It is rewritten only when its content
- * changes (e.g. an upgrade moved the driver path), so repeated launches don't churn.
+ * The file is a personal/global command, while the tool context supplies the active
+ * project directory at execution time. It is rewritten only when its content changes,
+ * so repeated launches don't churn.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from '@opencode-ai/plugin'
-import { buildFrontend } from '@retry-now/core'
+import { buildPluginCommandFile } from '@retry-now/core'
 
-// Absolute path to the driver entry, resolved relative to this module. Prefer the
-// compiled sibling when loaded from dist (published), else the .ts source (dev).
-const here = dirname(fileURLToPath(import.meta.url))
-const compiledDriver = join(here, 'driver-entry.js')
-const DRIVER_ENTRY = existsSync(compiledDriver)
-  ? compiledDriver
-  : join(here, 'driver-entry.ts')
+import { LoopController } from './native/controller.ts'
+import { createRetryNowTools, RetryNowToolRuntime } from './tools.ts'
+
+let loopController: LoopController | undefined
 
 /**
  * Materialise (or refresh) the opencode command file that exposes `/retry-now`.
  * Best-effort: never let a filesystem hiccup break opencode startup.
  */
-function ensureCommandFile(): void {
+export function ensureCommandFile(homeDirectory?: string): void {
   try {
-    // Personal/global driver (no `--cwd`): the loop runs in opencode's current cwd.
-    const file = buildFrontend('opencode', `bun "${DRIVER_ENTRY}"`)
-    const dest = join(homedir(), file.homePath)
+    const file = buildPluginCommandFile()
+    const dest = join(homeDirectory ?? homedir(), file.homePath)
     if (existsSync(dest) && readFileSync(dest, 'utf8') === file.content) return
     mkdirSync(dirname(dest), { recursive: true })
     writeFileSync(dest, file.content, 'utf8')
-  } catch {
-    // swallow — trigger installation is best-effort, never fatal
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(`retry-now command registration failed: ${detail}`)
   }
 }
 
@@ -56,6 +51,16 @@ function ensureCommandFile(): void {
 // command directories to build their slash-command registries.
 ensureCommandFile()
 
-export const RetryNowPlugin: Plugin = async () => ({})
+export const RetryNowPlugin: Plugin = async ({ client }) => {
+  const controller = loopController ?? new LoopController(client)
+  loopController = controller
+  const runtime = new RetryNowToolRuntime({ client, controller })
+  return {
+    event: async ({ event }) => {
+      controller.handleEvent(event)
+    },
+    tool: createRetryNowTools(runtime),
+  }
+}
 
 export default RetryNowPlugin
