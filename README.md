@@ -132,6 +132,14 @@ Then run **`/retry-now`** in opencode: when no config exists it runs the setup i
 (analysis / direction / completion) first, then starts the loop. The driver path and project root are baked in
 at load time, so **no global CLI install is needed**. To use a local file, drop the plugin in `.opencode/plugins/`.
 
+In plugin mode, `/retry-now` runs the loop **natively, in-process**, instead of spawning an external
+`opencode run` process. The command calls the `retrynow_start` tool; each phase then becomes a fresh
+child session created via the opencode SDK, nested under your session and visible in the TUI (titled
+`retry-now #NNNN ANALYZE`, etc.), so you can watch every life unfold without leaving the conversation.
+Check progress with `retrynow_status`; stop the loop cleanly with `retrynow_stop`. See
+[`packages/opencode`](packages/opencode#readme) for the native-mode `phaseTimeoutMs` anti-hang setting
+and the `modelVariant` limitation (with the `agentProfile` workaround).
+
 ---
 
 ## Quick start
@@ -207,7 +215,8 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | `reviewModel` | model for independent review; empty = implementation/shared model only when the CLI matches, otherwise the review CLI's default | `""` |
 | `modelVariant` | shared reasoning tier; opencode `--variant` / Codex `model_reasoning_effort` / Claude Code `--effort`; empty = inferred top tier | `""` |
 | `analysisVariant` / `improveVariant` / `reviewVariant` | role-specific reasoning tiers; same-CLI roles inherit implementation/shared values, while a different CLI infers its own top tier | `""` |
-| `agentProfile` | opencode `--agent` profile; empty = default | `""` |
+| `agentProfile` | opencode `--agent` profile; empty = default; under the opencode plugin's native mode this is the workaround for the missing variant field (point it at a profile carrying the model/variant you want) | `""` |
+| `phaseTimeoutMs` | opencode plugin (native mode) only: per-phase anti-hang timeout in ms; on timeout the driver aborts the child session and retries the phase; floored at `60000` | `1800000` |
 | `analysis` / `direction` / `completion` | the three intent prompts above | — (required) |
 | `threshold` | consecutive `no_improvements` lives until convergence | `5` |
 | `revertThreshold` | consecutive lives keeping 0 until convergence | `3` |
@@ -270,15 +279,20 @@ Each life is a one-shot, headless, **brand-new** session (never resumed); permis
 Claude's `--bare` skips `CLAUDE.md` / hooks / skills / MCP autoload, giving a deterministic clean rebirth — a
 perfect fit for the unbiased-analysis guarantee.
 
-**opencode can also be registered as a plugin** instead of the trigger file (`.opencode/command/`) — add
+**opencode can also be registered as a plugin** instead of the trigger file (`.opencode/command/`): add
 `@retry-now/opencode` to the `plugin` array in `opencode.json` and it auto-installs at startup, so `/retry-now`
-appears immediately (see Install above).
+appears immediately (see Install above). In plugin mode, opencode-role phases run **natively, in-process**
+rather than spawning the `opencode run "<msg>"` process shown in the table above: the command calls
+`retrynow_start`, and each phase appears as a nested child session in the TUI, checked with
+`retrynow_status` and stopped with `retrynow_stop`. `codex` and `claude` roles are unaffected either way,
+and the external `opencode run "<msg>"` spawn above remains exactly what the CLI trigger path
+(`retry-now install opencode`, `retry-now run`) still uses.
 
 ---
 
 ## Safety model
 
-- **ANALYZE is driver-enforced read-only** — the driver snapshots all Git-visible files and the raw Git
+- **ANALYZE is driver-enforced read-only** — the driver snapshots the transaction's Git-visible files and the raw Git
   index before launch, restores and stops if ANALYZE mutates them, and persistently quarantines an
   unauthorized commit without rewriting it.
 - **Every IMPROVE item is reviewed transactionally** — rejected items restore the last approved state. If
@@ -287,8 +301,10 @@ appears immediately (see Install above).
 - **Regressions roll back automatically** — a failed checkpoint (test/lint) or a benchmark regression reverts
   just that item; the build is always left green.
 - **The transaction boundary is Git-visible state** — tracked and non-ignored untracked files, file modes,
-  symlinks, and the exact raw index bytes are preserved. Files ignored by Git are outside this boundary and
-  are not detected or restored; agent tools must not use ignored project files for mutable work.
+  symlinks, and the exact raw index bytes are preserved. Untracked files under host-agent state directories
+  (`.omo/`, `.sisyphus/`) are outside detection and restoration because they are concurrent agent-platform
+  runtime noise; tracked files under those directories remain fully covered. Files ignored by Git are outside
+  this boundary and are not detected or restored; agent tools must not use ignored project files for mutable work.
 - **Submodules/gitlinks are rejected before agent launch** — repositories containing mode `160000` entries
   cannot be snapshotted safely and the iteration stops before ANALYZE runs.
 - **Transactions cover Git-visible files** — tracked files and ordinary untracked files are restored byte-for-byte,

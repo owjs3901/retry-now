@@ -6,6 +6,8 @@
  * user-facing configuration.
  */
 
+import type { AgentBackend } from './agent-backend.ts'
+
 /** Which headless coding agent the driver spawns each reincarnation. */
 export type AgentKind = 'opencode' | 'codex' | 'claude'
 
@@ -146,6 +148,13 @@ export interface RetryNowConfig {
    * target, each converging on its own and scoped to that path. Chosen at init for monorepos.
    */
   readonly targets: readonly string[]
+  /**
+   * Anti-hang bound for a single phase invocation (native opencode backend only): if the
+   * child session's turn doesn't complete within this window, the backend aborts it and
+   * returns a crash-equivalent so `PHASE_ATTEMPTS` retry kicks in instead of hanging forever.
+   * Default 30 min, floored to a 60s minimum so a stray tiny value can't self-DoS the loop.
+   */
+  readonly phaseTimeoutMs: number
 }
 
 /** Terminal status of the loop. */
@@ -276,6 +285,8 @@ export interface DriverOptions {
    * (per-run override) falling back to `config.waitForQuota`.
    */
   readonly waitForQuota: boolean
+  /** phase execution backend; defaults to the existing CLI subprocess implementation */
+  readonly backend?: AgentBackend
   /** optional progress sink; defaults to console */
   readonly log?: (line: string) => void
 }

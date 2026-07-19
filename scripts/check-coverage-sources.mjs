@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 const ROOT = process.cwd()
 const EXCLUDED_CORE = new Set([
+  'agent-backend.ts', // type-only execution contracts
   'loop-driver.ts', // subprocess/process orchestration; exercised through integration/manual QA
   'frontends.ts', // agent-home/project installer boundary
   'index.ts', // public re-export barrel

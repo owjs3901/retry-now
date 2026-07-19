@@ -4,8 +4,7 @@ import { basename, dirname, join } from 'node:path'
 
 import { expect, test } from 'bun:test'
 
-import type { GitResult, GitRunner } from '../git.ts'
-import { runGit } from '../git.ts'
+import { type GitResult, type GitRunner, runGit } from '../git.ts'
 import {
   captureRepositorySnapshot,
   repositoryDelta,
@@ -223,6 +222,64 @@ test('restore replaces an unmerged index with the exact captured raw bytes', asy
     ).stdout.trim()
     expect((await readFile(indexPath)).equals(snapshot.indexFile)).toBe(true)
     expect(await readFile(join(root, 'value.txt'), 'utf8')).toBe('main\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('restore preserves pre-existing untracked host-agent state that becomes staged', async () => {
+  const root = await initRepo({ 'src/value.ts': 'base\n' })
+  try {
+    const statePath = join(root, '.omo/keep.json')
+    await mkdir(dirname(statePath), { recursive: true })
+    await writeFile(statePath, '{"keep":true}\n')
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    expect(snapshot.entries.has('.omo/keep.json')).toBe(false)
+    expect((await runGit(['add', '.omo/keep.json'], root)).code).toBe(0)
+
+    expect(await restoreRepositorySnapshot(root, snapshot)).toBeNull()
+    const indexPath = (
+      await runGit(
+        ['rev-parse', '--path-format=absolute', '--git-path', 'index'],
+        root,
+      )
+    ).stdout.trim()
+    expect((await readFile(indexPath)).equals(snapshot.indexFile)).toBe(true)
+    expect(await readFile(statePath, 'utf8')).toBe('{"keep":true}\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('restore keeps tracked host-agent state inside the transaction boundary', async () => {
+  const root = await initRepo({ '.omo/plans/p.md': 'approved\n' })
+  try {
+    const statePath = join(root, '.omo/plans/p.md')
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    await writeFile(statePath, 'changed\n')
+
+    expect(await restoreRepositorySnapshot(root, snapshot)).toBeNull()
+    expect(await readFile(statePath)).toEqual(Buffer.from('approved\n'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('restore deletes ordinary untracked files absent from the snapshot', async () => {
+  const root = await initRepo({ 'src/value.ts': 'base\n' })
+  try {
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    const untrackedPath = join(root, 'src/evil.ts')
+    await writeFile(untrackedPath, 'unapproved\n')
+
+    expect(await restoreRepositorySnapshot(root, snapshot)).toBeNull()
+    expect(await Bun.file(untrackedPath).exists()).toBe(false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

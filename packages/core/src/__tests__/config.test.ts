@@ -24,12 +24,14 @@ import {
   DEFAULT_IMPROVEMENT_BATCH_SIZE,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MAX_QUOTA_WAIT_MS,
+  DEFAULT_PHASE_TIMEOUT_MS,
   DEFAULT_QUOTA_POLL_MS,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
   loadConfig,
   MAX_IMPROVEMENT_BATCH_SIZE,
   MIN_IMPROVEMENT_BATCH_SIZE,
+  MIN_PHASE_TIMEOUT_MS,
   MIN_QUOTA_POLL_MS,
   normalizeConfig,
   type RawRetryNowConfig,
@@ -77,6 +79,7 @@ function validRaw(): Partial<RetryNowConfig> {
     quotaPollMs: 300000,
     maxQuotaWaitMs: 7200000,
     targets: ['packages/core', 'packages/cli'],
+    phaseTimeoutMs: 900000,
   }
 }
 
@@ -116,6 +119,7 @@ test('valid input round-trips through normalizeConfig unchanged in every field',
     quotaPollMs: 300000,
     maxQuotaWaitMs: 7200000,
     targets: ['packages/core', 'packages/cli'],
+    phaseTimeoutMs: 900000,
   })
 })
 
@@ -414,6 +418,53 @@ test('quota fields default when omitted (off · 15m poll · 6h cap)', () => {
   expect(out.waitForQuota).toBe(false)
   expect(out.quotaPollMs).toBe(DEFAULT_QUOTA_POLL_MS)
   expect(out.maxQuotaWaitMs).toBe(DEFAULT_MAX_QUOTA_WAIT_MS)
+})
+
+test('phaseTimeoutMs defaults to 30 minutes when omitted', () => {
+  const out = normalizeConfig(
+    bad({ agent: 'opencode', analysis: 'a', direction: 'b', completion: 'c' }),
+  )
+  expect(out.phaseTimeoutMs).toBe(DEFAULT_PHASE_TIMEOUT_MS)
+  expect(out.phaseTimeoutMs).toBe(1_800_000)
+})
+
+test('phaseTimeoutMs: a custom in-range value round-trips unchanged', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      phaseTimeoutMs: 600_000,
+    }),
+  )
+  expect(out.phaseTimeoutMs).toBe(600_000)
+})
+
+test('phaseTimeoutMs: a non-numeric value falls back to the default', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      phaseTimeoutMs: 'soon',
+    }),
+  )
+  expect(out.phaseTimeoutMs).toBe(DEFAULT_PHASE_TIMEOUT_MS)
+})
+
+test('phaseTimeoutMs: a value below the floor is floored to MIN_PHASE_TIMEOUT_MS (no self-DoS)', () => {
+  const out = normalizeConfig(
+    bad({
+      agent: 'opencode',
+      analysis: 'a',
+      direction: 'b',
+      completion: 'c',
+      phaseTimeoutMs: 1_000,
+    }),
+  )
+  expect(out.phaseTimeoutMs).toBe(MIN_PHASE_TIMEOUT_MS)
 })
 
 test('improvementBatchSize: non-numeric falls back to the default and stays in range', () => {

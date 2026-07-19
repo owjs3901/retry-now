@@ -190,6 +190,21 @@ ${buildFrontendBody('opencode', driverCommand)}
   }
 }
 
+/** Build the opencode plugin command, preserving STEP 1 while dispatching STEP 2 in-process. */
+export function buildPluginCommandFile(): FrontendFile {
+  const file = opencodeCommand('')
+  const content = file.content.replace(
+    /## STEP 2 — run the loop[\s\S]*$/,
+    `## STEP 2 — run the loop
+
+Call the \`retrynow_start\` tool exactly once. Pass \`dryRun: true\` only when explicitly requested; otherwise omit it. Do NOT run a shell command.
+
+Then report that the loop started. Each fresh phase appears as a child session titled \`retry-now #NNNN …\`. Progress and stopping use \`retrynow_status\` and \`retrynow_stop\`. Do NOT modify files yourself — the loop's child sessions do that.
+`,
+  )
+  return { ...file, content }
+}
+
 function claudeCommand(driverCommand: string): FrontendFile {
   return {
     projectPath: '.claude/commands/retry-now.md',

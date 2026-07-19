@@ -38,6 +38,41 @@ Verification:
 ${verification(input.config)}`
 }
 
+function signalShapeItem(input: ItemPromptInput): string {
+  return `\`\`\`json
+${JSON.stringify(
+  {
+    iteration: input.iteration,
+    phase: 'improve',
+    result: 'applied',
+    report: input.artifacts.report,
+    plannedCount: 1,
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    appliedImprovements: [
+      {
+        id: input.item.id,
+        title: input.item.title,
+        status: 'kept',
+        impact: 'what improved and why it matters',
+        decisionReason: 'independent evidence for this verdict',
+        metricDelta: 'none',
+        files: [
+          input.item.targetFiles?.[0] ?? '<changed repository-relative path>',
+        ],
+      },
+    ],
+    summary: '1-2 sentence summary',
+    timestamp: '<ISO-8601>',
+  },
+  null,
+  2,
+)}
+\`\`\``
+}
+
 export function buildItemImplementPrompt(input: ItemPromptInput): string {
   return `# IMPROVE ITEM IMPLEMENTATION
 
@@ -49,10 +84,17 @@ ${common(input)}
 Before editing, copy every existing file you will change into the backup directory while preserving
 its repository-relative path, and record every new file so rejection can delete it. Implement the
 smallest correct candidate and run the configured relevant verification/benchmark. Your conclusion
-is only an UNTRUSTED RECOMMENDATION for an independent reviewer. Write exactly one
-appliedImprovements entry, with phase "improve", plannedCount 1, all four status counts, evidence,
-and changed files when recommending kept. Write the report, then overwrite only the signal path as
-your final action. Never commit.`
+is only an UNTRUSTED RECOMMENDATION for an independent reviewer.
+
+Write the signal using this exact single-item JSON shape:
+${signalShapeItem(input)}
+
+Always emit exactly one appliedImprovements entry, plannedCount 1, and all four status counts. When
+you made the change and recommend keeping it, use result "applied", status "kept", keptCount 1, and
+list every changed file. If you could not implement it, use result "failed", status "failed",
+failedCount 1, files [], and set the other three status counts to 0. These are terminal signals;
+never emit result "pending". Write the report, then overwrite only the signal path as your final
+action. Never commit.`
 }
 
 export function buildItemReviewPrompt(
@@ -72,8 +114,17 @@ ${JSON.stringify(implementation, null, 2)}
 Inspect the actual candidate diff and implementation report. Rerun every configured relevant
 verification/benchmark yourself. You alone own the final kept/reverted/failed/skipped verdict. If
 you reject the candidate for any reason, restore its backup completely and delete candidate-created
-files BEFORE signalling so the next item cannot observe rejected work. Write exactly one
-appliedImprovements entry, with phase "improve", plannedCount 1, all four status counts, evidence,
-and files only for a kept verdict. Write the report, then overwrite only the signal path as your
-final action. Never commit.`
+files BEFORE signalling so the next item cannot observe rejected work.
+
+Write the signal using this exact single-item JSON shape:
+${signalShapeItem(input)}
+
+Always emit exactly one appliedImprovements entry, plannedCount 1, and all four status counts. Use
+result "applied" with status "kept", keptCount 1, and every kept file when you independently verify
+and keep the candidate. Use result "applied_reverted" with status "reverted", revertedCount 1, and
+files [] when you restore the backup. Use result "failed" with status "failed" and failedCount 1 on
+failure. If the item is not applicable, use result "failed" with status "skipped", skippedCount 1,
+and files []. In every case set the other three status counts to 0. These are terminal signals;
+never emit result "pending". Write the report, then overwrite only the signal path as your final
+action. Never commit.`
 }

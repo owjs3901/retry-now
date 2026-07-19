@@ -38,6 +38,10 @@ export const DEFAULT_QUOTA_POLL_MS = 15 * 60 * 1000
 export const DEFAULT_MAX_QUOTA_WAIT_MS = 6 * 60 * 60 * 1000
 /** Floor on the poll interval so a stray tiny value can't busy-loop the driver. */
 export const MIN_QUOTA_POLL_MS = 1000
+/** `phaseTimeoutMs` default: 30 min anti-hang bound for a single native phase invocation. */
+export const DEFAULT_PHASE_TIMEOUT_MS = 30 * 60 * 1000
+/** Floor on `phaseTimeoutMs` so a stray tiny value can't self-DoS every phase. */
+export const MIN_PHASE_TIMEOUT_MS = 60_000
 
 export const DEFAULTS: RetryNowConfig = {
   version: 1,
@@ -72,6 +76,7 @@ export const DEFAULTS: RetryNowConfig = {
   quotaPollMs: DEFAULT_QUOTA_POLL_MS,
   maxQuotaWaitMs: DEFAULT_MAX_QUOTA_WAIT_MS,
   targets: [],
+  phaseTimeoutMs: DEFAULT_PHASE_TIMEOUT_MS,
 }
 
 export class ConfigError extends Error {
@@ -230,6 +235,12 @@ export function normalizeConfig(raw: RawRetryNowConfig): RetryNowConfig {
           .map((t) => t.trim().replace(/\\/g, '/').replace(/\/+$/, ''))
           .filter((t) => t !== '')
       : [],
+    // Floor (not throw): a stray tiny timeout degrades to a safe minimum rather than
+    // aborting every phase instantly; an out-of-range value is a harmless timing knob.
+    phaseTimeoutMs: Math.max(
+      MIN_PHASE_TIMEOUT_MS,
+      int(raw.phaseTimeoutMs, DEFAULT_PHASE_TIMEOUT_MS),
+    ),
   }
 }
 
