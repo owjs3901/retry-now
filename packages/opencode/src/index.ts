@@ -25,7 +25,12 @@ import { dirname, join } from 'node:path'
 import type { Plugin } from '@opencode-ai/plugin'
 import { buildPluginCommandFile } from '@retry-now/core'
 
+import { AutoStartCoordinator } from './native/auto-start.ts'
 import { LoopController } from './native/controller.ts'
+import {
+  isSessionIdleEvent,
+  retryNowCommandSessionID,
+} from './native/plugin-events.ts'
 import { createRetryNowTools, RetryNowToolRuntime } from './tools.ts'
 
 let loopController: LoopController | undefined
@@ -51,13 +56,31 @@ export function ensureCommandFile(homeDirectory?: string): void {
 // command directories to build their slash-command registries.
 ensureCommandFile()
 
-export const RetryNowPlugin: Plugin = async ({ client }) => {
+export const RetryNowPlugin: Plugin = async ({ client, directory }) => {
   const controller = loopController ?? new LoopController(client)
   loopController = controller
   const runtime = new RetryNowToolRuntime({ client, controller })
+  // Start the loop from the `/retry-now` command itself — no agent-callable tool. Bus events fire
+  // for every session regardless of the active (possibly curated) agent, so `/retry-now` works
+  // everywhere. `command.executed` records the parent session; `session.idle` is when we actually
+  // start, so STEP 1 has already written `.retry-now/config.json`. `start()` is idempotent.
+  const autoStart = new AutoStartCoordinator({
+    start: (parentSessionID) =>
+      runtime.start({}, { directory, sessionID: parentSessionID }).then(() => {
+        // discard the human-facing string; the coordinator confirms via isActive
+      }),
+    isActive: () => controller.getLoopStatus(directory) !== undefined,
+    log: (line) => console.error(line),
+  })
   return {
     event: async ({ event }) => {
       controller.handleEvent(event)
+      const commandSessionID = retryNowCommandSessionID(event)
+      if (commandSessionID !== undefined) {
+        await autoStart.onCommandExecuted(commandSessionID)
+        return
+      }
+      if (isSessionIdleEvent(event)) await autoStart.onIdle()
     },
     tool: createRetryNowTools(runtime),
   }

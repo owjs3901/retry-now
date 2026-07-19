@@ -193,13 +193,19 @@ ${buildFrontendBody('opencode', driverCommand)}
 /** Build the opencode plugin command, preserving STEP 1 while dispatching STEP 2 in-process. */
 export function buildPluginCommandFile(): FrontendFile {
   const file = opencodeCommand('')
+  // STEP 2 needs NO agent-callable tool. The plugin's `event` hook watches for the
+  // `command.executed` event (name === "retry-now") and starts the loop itself — exactly how
+  // oh-my-openagent's ralph-loop is driven by `session.idle`. Event hooks fire for every session
+  // regardless of the agent, whereas a curated orchestrator agent (e.g. Sisyphus) filters out
+  // plugin-registered TOOLS. So the loop starts from ANY agent with no agent pin and no tool call;
+  // the agent only has to finish writing `.retry-now/config.json` in STEP 1 (Write is universal).
   const content = file.content.replace(
     /## STEP 2 — run the loop[\s\S]*$/,
     `## STEP 2 — run the loop
 
-Call the \`retrynow_start\` tool exactly once. Pass \`dryRun: true\` only when explicitly requested; otherwise omit it. Do NOT run a shell command.
+Do NOT call any tool and do NOT run a shell command. Once STEP 1 has written \`.retry-now/config.json\`, the retry-now plugin detects this \`/retry-now\` command and starts the loop in-process automatically — from whatever agent you are in.
 
-Then report that the loop started. Each fresh phase appears as a child session titled \`retry-now #NNNN …\`. Progress and stopping use \`retrynow_status\` and \`retrynow_stop\`. Do NOT modify files yourself — the loop's child sessions do that.
+Just report that the loop is starting. Each fresh phase appears as a child session titled \`retry-now #NNNN …\`; the loop stops itself on convergence, a \`.retry-now/STOP\` file, or the safety cap. Do NOT modify files yourself — the loop's child sessions do that.
 `,
   )
   return { ...file, content }
