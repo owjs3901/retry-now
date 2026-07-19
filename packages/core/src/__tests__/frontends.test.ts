@@ -25,12 +25,35 @@ for (const agent of ['opencode', 'claude', 'codex'] as const) {
   })
 }
 
-test('exports a dedicated plugin command-file builder', () => {
+test('exports a dedicated plugin command-file builder that dispatches in-process', () => {
   // Given
   const pluginCommand = frontends.buildPluginCommandFile()
 
-  // When / Then
-  expect(pluginCommand.content).toContain('`retrynow_start`')
+  // When / Then — the plugin runs the loop in-process; no external bun driver spawn.
   expect(pluginCommand.content).not.toContain('bun ')
   expect(pluginCommand.content).not.toContain('driver-entry')
+})
+
+test('drives STEP 2 from the plugin: no agent-callable tool and no agent pin', () => {
+  // Given
+  const pluginCommand = frontends.buildPluginCommandFile()
+
+  // When
+  const frontmatter = pluginCommand.content.split('---')[1] ?? ''
+
+  // Then — the loop starts from the plugin's `command.executed` hook, so the agent calls NO tool
+  // and the command is NOT pinned to any agent. That is what lets `/retry-now` run from ANY agent
+  // (including a curated orchestrator that filters out plugin-registered tools).
+  expect(frontmatter).not.toContain('agent:')
+  expect(pluginCommand.content).not.toContain('retrynow_start')
+  expect(pluginCommand.content).toContain('automatically')
+})
+
+test('leaves the CLI-installed opencode command WITHOUT an agent pin', () => {
+  // The CLI `install opencode` frontend drives the external bun loop via Bash (a core tool every
+  // agent already has), so it must NOT carry an agent pin either.
+  const cliFrontend = frontends.buildFrontend('opencode', DRIVER)
+  const frontmatter = cliFrontend.content.split('---')[1] ?? ''
+
+  expect(frontmatter).not.toContain('agent: build')
 })
