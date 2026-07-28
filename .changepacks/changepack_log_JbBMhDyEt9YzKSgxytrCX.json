@@ -1,0 +1,1 @@
+{"changes":{"packages/cli/package.json":"Minor","packages/detect/package.json":"Minor","packages/core/package.json":"Minor","packages/codex/package.json":"Minor","packages/claude/package.json":"Minor","packages/opencode/package.json":"Minor"},"note":"Fix crash issue","date":"2026-07-28T10:57:27.843941400Z"}

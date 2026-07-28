@@ -1,4 +1,5 @@
 import { isSafeRepoFilePath } from './git.ts'
+import { SIGNAL_LIMITS } from './limits.ts'
 import { hasUnsafeTextCharacter } from './safe-text.ts'
 import type { PlannedImprovement, Signal } from './types.ts'
 
@@ -22,22 +23,47 @@ export function validateImproveSignal(
   const plannedIds = new Set(planned.map((item) => item.id))
   const seen = new Set<string>()
   for (const item of outcomes) {
+    if (!/^\d{1,4}$/.test(item.id)) {
+      return `item id "${item.id}" must contain 1 to 4 digits`
+    }
     if (seen.has(item.id) || !plannedIds.has(item.id)) {
       return 'every outcome must match one unique analyze plan id'
     }
     seen.add(item.id)
+    if (!item.title.trim()) return `item ${item.id} must report title`
+    if (item.title.length > SIGNAL_LIMITS.title) {
+      return `item ${item.id} title is ${item.title.length} characters; the limit is ${SIGNAL_LIMITS.title}`
+    }
+    if (hasUnsafeTextCharacter(item.title)) {
+      return `item ${item.id} title is unsafe: it contains an unsafe control character or bidirectional override`
+    }
     if (!item.impact?.trim()) return `item ${item.id} must report impact`
-    if (item.impact.length > 1000 || hasUnsafeTextCharacter(item.impact)) {
-      return `item ${item.id} impact is unsafe or too long`
+    if (item.impact.length > SIGNAL_LIMITS.impact) {
+      return `item ${item.id} impact is ${item.impact.length} characters; the limit is ${SIGNAL_LIMITS.impact}. Move the full evidence into the report markdown and keep the signal field short.`
+    }
+    if (hasUnsafeTextCharacter(item.impact)) {
+      return `item ${item.id} impact is unsafe: it contains an unsafe control character or bidirectional override`
     }
     if (!item.decisionReason?.trim()) {
       return `item ${item.id} must report decisionReason`
     }
+    if (item.decisionReason.length > SIGNAL_LIMITS.decisionReason) {
+      return `item ${item.id} decisionReason is ${item.decisionReason.length} characters; the limit is ${SIGNAL_LIMITS.decisionReason}. Move the full evidence into the report markdown and keep the signal field short.`
+    }
+    if (hasUnsafeTextCharacter(item.decisionReason)) {
+      return `item ${item.id} decisionReason is unsafe: it contains an unsafe control character or bidirectional override`
+    }
     if (
-      item.decisionReason.length > 1000 ||
-      hasUnsafeTextCharacter(item.decisionReason)
+      item.metricDelta !== undefined &&
+      item.metricDelta.length > SIGNAL_LIMITS.metricDelta
     ) {
-      return `item ${item.id} decisionReason is unsafe or too long`
+      return `item ${item.id} metricDelta is ${item.metricDelta.length} characters; the limit is ${SIGNAL_LIMITS.metricDelta}. Move the full evidence into the report markdown and keep the signal field short.`
+    }
+    if (
+      item.metricDelta !== undefined &&
+      hasUnsafeTextCharacter(item.metricDelta)
+    ) {
+      return `item ${item.id} metricDelta is unsafe: it contains an unsafe control character or bidirectional override`
     }
     if (item.status === 'kept') {
       if (!item.files || item.files.length === 0) {

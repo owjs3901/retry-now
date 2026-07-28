@@ -190,6 +190,55 @@ ${buildFrontendBody('opencode', driverCommand)}
   }
 }
 
+/**
+ * A tiny opencode command that SHOWS retry-now progress by reading the runtime dir — no plugin tool
+ * needed. A curated orchestrator agent (e.g. Sisyphus) filters out plugin-registered tools, so the
+ * `retrynow_status` tool is invisible there; `Read` is universal, so this works from any agent.
+ */
+export function buildPluginStatusCommandFile(): FrontendFile {
+  return {
+    projectPath: '.opencode/command/retry-now-status.md',
+    homePath: '.config/opencode/command/retry-now-status.md',
+    invoke: '/retry-now-status',
+    content: `---
+description: retry-now — show loop progress + live phase sessions (진행 상황 보기)
+---
+
+Show the CURRENT retry-now progress for THIS project, then stop. Do NOT modify anything, do NOT start or stop the loop, and do NOT run the analysis yourself.
+
+Do EXACTLY this:
+1. Read \`.retry-now/state.json\` (status, iteration, streaks) and \`.retry-now/current.json\` (current phase). If \`.retry-now/\` does not exist, tell the user the loop has not run yet and stop.
+2. Read the LAST ~40 lines of \`.retry-now/logs/plugin.log\` — the driver's live progress; the newest \`=== driver start\` block is the current run.
+3. Tell the user that each live phase runs as its own child session titled \`retry-now #NNNN\` — they open one with Ctrl+X to watch it live.
+
+Then give a short summary in the user's language: whether the loop is running, which iteration + phase, and the last few progress lines.
+`,
+  }
+}
+
+/**
+ * A tiny opencode command that STOPS the loop by writing the STOP sentinel. `Write` is universal, so
+ * it works from any agent even though the `retrynow_stop` plugin tool is filtered out by a curated
+ * orchestrator agent. The loop halts at the next phase boundary.
+ */
+export function buildPluginStopCommandFile(): FrontendFile {
+  return {
+    projectPath: '.opencode/command/retry-now-stop.md',
+    homePath: '.config/opencode/command/retry-now-stop.md',
+    invoke: '/retry-now-stop',
+    content: `---
+description: retry-now — stop the loop at the next boundary (정지)
+---
+
+Stop the retry-now loop for THIS project. Do EXACTLY this and nothing else:
+
+Write an EMPTY file at \`.retry-now/STOP\`. The running loop halts at the next phase boundary — the current phase finishes first, then it stops before the next one.
+
+Then confirm to the user, in their language, that STOP was written and the loop will stop at the next boundary. Do NOT modify any other file.
+`,
+  }
+}
+
 /** Build the opencode plugin command, preserving STEP 1 while dispatching STEP 2 in-process. */
 export function buildPluginCommandFile(): FrontendFile {
   const file = opencodeCommand('')

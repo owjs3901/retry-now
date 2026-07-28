@@ -165,3 +165,46 @@ test('aborts every currently active child owned by the requested directory', asy
     { path: { id: 'child-2' }, query: { directory } },
   ])
 })
+
+test('activeChildren lists the live phase sessions for a directory with their titles', () => {
+  // Given
+  const client = new FakeNativeClient()
+  const controller = new LoopController(client)
+  controller.registerChild('ses-analyze', {
+    directory,
+    skipPermissions: true,
+    title: 'retry-now #0001 ANALYZE',
+  })
+  controller.registerChild('ses-improve', {
+    directory,
+    skipPermissions: true,
+    title: 'retry-now #0001 IMPROVE item 1 implement',
+  })
+  // A child under a different project must not leak into this project's live view.
+  controller.registerChild('ses-other', {
+    directory: 'C:/workspace/other',
+    skipPermissions: true,
+    title: 'retry-now #0007 ANALYZE',
+  })
+
+  // Then — only this directory's live children, each with its title
+  expect(controller.activeChildren(directory)).toEqual([
+    { sessionID: 'ses-analyze', title: 'retry-now #0001 ANALYZE' },
+    {
+      sessionID: 'ses-improve',
+      title: 'retry-now #0001 IMPROVE item 1 implement',
+    },
+  ])
+
+  // When a phase finishes it is unregistered → it drops out of the live view.
+  controller.unregisterChild('ses-analyze')
+  // And a title-less child falls back to a stable placeholder.
+  controller.registerChild('ses-untitled', { directory, skipPermissions: true })
+  expect(controller.activeChildren(directory)).toEqual([
+    {
+      sessionID: 'ses-improve',
+      title: 'retry-now #0001 IMPROVE item 1 implement',
+    },
+    { sessionID: 'ses-untitled', title: '(phase)' },
+  ])
+})

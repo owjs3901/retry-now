@@ -30,6 +30,8 @@ export class ChildSessionWaitAbortedError extends Error {
 export interface ManagedChildOptions {
   readonly directory: string
   readonly skipPermissions: boolean
+  /** The child session's title (e.g. "retry-now #0001 ANALYZE"), shown in live status. */
+  readonly title?: string
 }
 
 export type LoopActivity = 'running' | 'stopping'
@@ -41,6 +43,19 @@ interface ManagedChild extends ManagedChildOptions {
 interface ChildWaiter {
   readonly resolve: () => void
   readonly reject: (error: Error) => void
+}
+
+/**
+ * A persistent per-child event sink. Unlike a `ChildWaiter` (resolved + discarded on the FIRST
+ * idle), a monitor keeps receiving every idle / activity / error event for its child until the
+ * backend unsubscribes, so the backend — not the controller — decides when the phase is actually
+ * done (a child goes idle on every turn boundary, including while its own background sub-agents
+ * are still running).
+ */
+export interface ChildMonitor {
+  readonly onIdle?: () => void
+  readonly onActivity?: () => void
+  readonly onError?: (error: Error) => void
 }
 
 type ControllerLogger = (line: string) => void
@@ -60,6 +75,7 @@ function resultError(result: NativeClientResult<unknown>): unknown | undefined {
 export class LoopController {
   private readonly children = new Map<string, ManagedChild>()
   private readonly waiters = new Map<string, Set<ChildWaiter>>()
+  private readonly monitors = new Map<string, Set<ChildMonitor>>()
   private readonly loops = new Map<string, LoopActivity>()
 
   constructor(
@@ -72,6 +88,23 @@ export class LoopController {
       ...options,
       repliedPermissions: new Set<string>(),
     })
+  }
+
+  /**
+   * The phase child sessions currently live for a project — the driver registers each on launch and
+   * unregisters it on completion, so this is exactly the sub-agent(s) running right now. Powers the
+   * live view in `retrynow_status` (the SDK-accessible stand-in for a background-task panel).
+   */
+  activeChildren(
+    directory: string,
+  ): readonly { readonly sessionID: string; readonly title: string }[] {
+    const active: { readonly sessionID: string; readonly title: string }[] = []
+    for (const [sessionID, child] of this.children) {
+      if (child.directory === directory) {
+        active.push({ sessionID, title: child.title ?? '(phase)' })
+      }
+    }
+    return active
   }
 
   unregisterChild(sessionID: string): void {
@@ -93,6 +126,7 @@ export class LoopController {
 
     if (event.type === 'session.idle') {
       if (typeof properties.sessionID === 'string') {
+        this.notifyMonitors(properties.sessionID, 'idle')
         this.resolveChild(properties.sessionID)
       }
       return
@@ -101,10 +135,14 @@ export class LoopController {
     if (event.type === 'session.status') {
       if (
         typeof properties.sessionID === 'string' &&
-        isRecord(properties.status) &&
-        properties.status.type === 'idle'
+        isRecord(properties.status)
       ) {
-        this.resolveChild(properties.sessionID)
+        if (properties.status.type === 'idle') {
+          this.notifyMonitors(properties.sessionID, 'idle')
+          this.resolveChild(properties.sessionID)
+        } else if (properties.status.type === 'busy') {
+          this.notifyMonitors(properties.sessionID, 'activity')
+        }
       }
       return
     }
@@ -113,10 +151,12 @@ export class LoopController {
       event.type === 'session.error' &&
       typeof properties.sessionID === 'string'
     ) {
-      this.rejectChild(
+      const error = new ChildSessionError(
         properties.sessionID,
-        new ChildSessionError(properties.sessionID, properties.error),
+        properties.error,
       )
+      this.notifyError(properties.sessionID, error)
+      this.rejectChild(properties.sessionID, error)
     }
   }
 
@@ -162,6 +202,40 @@ export class LoopController {
       abortSignal.addEventListener('abort', onAbort, { once: true })
       if (abortSignal.aborted) onAbort()
     })
+  }
+
+  /**
+   * Subscribe to a child's lifecycle events for the whole phase, returning an unsubscribe fn.
+   * Unlike a `ChildWaiter` (resolved + discarded on the FIRST idle), a monitor keeps receiving
+   * every idle / activity / error until unsubscribed, so the backend — not the controller —
+   * decides when the phase is truly done (a child goes idle on every turn boundary, including
+   * while its own background sub-agents still run).
+   */
+  monitorChild(sessionID: string, monitor: ChildMonitor): () => void {
+    const monitors = this.monitors.get(sessionID) ?? new Set<ChildMonitor>()
+    monitors.add(monitor)
+    this.monitors.set(sessionID, monitors)
+    return () => {
+      const current = this.monitors.get(sessionID)
+      if (current === undefined) return
+      current.delete(monitor)
+      if (current.size === 0) this.monitors.delete(sessionID)
+    }
+  }
+
+  private notifyMonitors(sessionID: string, event: 'idle' | 'activity'): void {
+    const monitors = this.monitors.get(sessionID)
+    if (monitors === undefined) return
+    for (const monitor of monitors) {
+      if (event === 'idle') monitor.onIdle?.()
+      else monitor.onActivity?.()
+    }
+  }
+
+  private notifyError(sessionID: string, error: Error): void {
+    const monitors = this.monitors.get(sessionID)
+    if (monitors === undefined) return
+    for (const monitor of monitors) monitor.onError?.(error)
   }
 
   async abortActive(directory: string): Promise<void> {

@@ -101,13 +101,27 @@ export async function restoreRepositorySnapshot(
 
   const verified = await captureRepositorySnapshot(root, git, files)
   if (verified === null) return 'restored repository snapshot is unavailable'
+  // The raw index remains the restoration mechanism, but restoring file contents can churn Git's
+  // stat cache afterward. `indexTree` already proves that the staged paths, modes, and blobs match,
+  // so raw index serialization is deliberately not an equality post-condition.
   if (
     verified.head !== snapshot.head ||
     verified.indexTree !== snapshot.indexTree ||
-    !verified.indexFile.equals(snapshot.indexFile) ||
     repositoryDelta(snapshot, verified).length > 0
   ) {
-    return 'repository did not match the approved snapshot after restoration'
+    const prefix =
+      'repository did not match the approved snapshot after restoration:'
+    if (verified.head !== snapshot.head) {
+      return `${prefix} HEAD is ${verified.head}, expected ${snapshot.head}`
+    }
+    if (verified.indexTree !== snapshot.indexTree) {
+      return `${prefix} staged tree is ${verified.indexTree}, expected ${snapshot.indexTree}`
+    }
+    const differingFiles = repositoryDelta(snapshot, verified)
+    const visibleFiles = differingFiles.slice(0, 5)
+    const remaining = differingFiles.length - visibleFiles.length
+    const suffix = remaining > 0 ? ` (+${remaining} more)` : ''
+    return `${prefix} ${differingFiles.length} file(s) differ (${visibleFiles.join(', ')})${suffix}`
   }
   return null
 }

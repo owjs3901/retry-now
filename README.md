@@ -73,7 +73,8 @@ flowchart TD
 2. **IMPROVE** *(only when ANALYZE found something)* — works the plan **item by item** with parallelism
    forbidden. The driver starts a fresh implementation session for one item, then a separate fresh review
    session that treats the implementation result as untrusted and independently reruns relevant checks and
-   benchmarks. Only the review verdict is final; the next item starts afterward. On a regression it reverts
+   benchmarks. The review recommends a verdict; before accepting `kept`, the driver independently reruns
+   configured test/lint and overrides it to `reverted` on failure. On a regression it reverts
    **only that item** from its backup and keeps the good ones. A partial success
    is not a failure but the **correct, expected** outcome — it never rewrites everything in one sweep.
 3. **The driver** records the result, updates the streaks in `state.json`, and reincarnates again — until a
@@ -224,7 +225,7 @@ editable later in `.retry-now/config.json`, and injected into every life's analy
 | `improvementBatchSize` | max plan items per life (`1`..`16`; `1` = classic single change) | `8` |
 | `skipPermissions` | unattended runs: skip the agent's permission prompts | `true` |
 | `commitPerIteration` | driver commits each life's kept changes with applied/planned counts and per-item evidence (`retry-now#NNNN:` prefix) | `true` |
-| `verifyEnabled` + `verifyTest` / `verifyLint` | run test/lint after IMPROVE; revert on failure | `false` / `""` |
+| `verifyEnabled` + `verifyTest` / `verifyLint` | driver re-runs test/lint after each kept IMPROVE review; revert item on failure | `false` / `""` |
 | `benchCommand` + `benchRuns` | before/after benchmark (median of N runs); revert on regression | `""` / `5` |
 | `targets` | package paths for split mode; empty = whole repo | `[]` |
 
@@ -298,18 +299,22 @@ and the external `opencode run "<msg>"` spawn above remains exactly what the CLI
 - **Every IMPROVE item is reviewed transactionally** — rejected items restore the last approved state. If
   a later implementation/review ends in an ordinary failure or quota stop, the driver restores the entire
   iteration-start snapshot so earlier unrecorded partial progress is not stranded.
-- **Regressions roll back automatically** — a failed checkpoint (test/lint) or a benchmark regression reverts
-  just that item; the build is always left green.
+- **Regressions roll back automatically** — the driver independently re-runs configured test/lint as the final
+  per-item gate and overrides a kept recommendation to reverted on failure; a review-detected benchmark
+  regression also reverts just that item.
 - **The transaction boundary is Git-visible state** — tracked and non-ignored untracked files, file modes,
-  symlinks, and the exact raw index bytes are preserved. Untracked files under host-agent state directories
-  (`.omo/`, `.sisyphus/`) are outside detection and restoration because they are concurrent agent-platform
-  runtime noise; tracked files under those directories remain fully covered. Files ignored by Git are outside
-  this boundary and are not detected or restored; agent tools must not use ignored project files for mutable work.
+  and symlinks are preserved, and the approved index is restored from its exact captured bytes. Restoration is
+  verified by HEAD, the staged tree, and file contents, modes, and symlinks; post-restoration raw index bytes
+  may differ because Git regenerates its stat cache. Untracked files under host-agent state directories (`.omo/`,
+  `.sisyphus/`) are outside detection and restoration because they are concurrent agent-platform runtime noise;
+  tracked files under those directories remain fully covered. Files ignored by Git are outside this boundary and
+  are not detected or restored; agent tools must not use ignored project files for mutable work.
 - **Submodules/gitlinks are rejected before agent launch** — repositories containing mode `160000` entries
   cannot be snapshotted safely and the iteration stops before ANALYZE runs.
 - **Transactions cover Git-visible files** — tracked files and ordinary untracked files are restored byte-for-byte,
-  including modes, symlinks, and the raw Git index. Ignored files (for example `.env`, caches, and generated output)
-  are outside this guarantee and should be protected separately.
+  including modes and symlinks. The raw Git index is restored from its exact captured bytes, but verification
+  deliberately allows Git's regenerated stat cache to change its post-restoration serialization. Ignored files
+  (for example `.env`, caches, and generated output) are outside this guarantee and should be protected separately.
 - **Unexpected commits are quarantined, never reset automatically** — if an agent changes `HEAD`, retry-now stops
   and blocks reruns until the expected revision is restored or `retry-now reset` explicitly accepts the current state.
 - **Interrupted batches roll back as one iteration** — if a later item crashes or exhausts quota, earlier reviewed

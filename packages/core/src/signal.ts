@@ -7,9 +7,9 @@
  */
 import { isSafeRepoFilePath } from './git.ts'
 import { nowIso, readJson, writeJson } from './io.ts'
+import { SIGNAL_LIMITS } from './limits.ts'
 import type { Paths } from './paths.ts'
 import { pad } from './paths.ts'
-import { hasUnsafeTextCharacter } from './safe-text.ts'
 import type {
   AppliedImprovement,
   BatchItemStatus,
@@ -20,6 +20,7 @@ import type {
   Signal,
 } from './types.ts'
 
+export { validateAnalyzeSignal } from './analyze-signal.ts'
 export { validateImproveSignal } from './improve-signal.ts'
 
 /** Reset the signal to `pending` and publish the per-reincarnation hint. */
@@ -86,12 +87,7 @@ function optStr(v: unknown): string | undefined {
 
 function optPlanText(v: unknown): string | undefined {
   const text = optStr(v)?.trim()
-  return text !== undefined &&
-    text !== '' &&
-    text.length <= 2000 &&
-    !hasUnsafeTextCharacter(text)
-    ? text
-    : undefined
+  return text !== undefined && text !== '' ? text : undefined
 }
 
 /** A count is trustworthy only when it is a finite, non-negative integer. */
@@ -105,13 +101,11 @@ function optCount(v: unknown): number | undefined {
 function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
   if (!Array.isArray(v)) return undefined
   const out: PlannedImprovement[] = []
-  for (const item of v.slice(0, 16)) {
+  for (const item of v) {
     if (!isRecord(item)) continue
     const id = optStr(item.id)
     const title = optStr(item.title)
     if (id === undefined || title === undefined) continue
-    if (!/^\d{1,4}$/.test(id) || title === '' || title.length > 200) continue
-    if (hasUnsafeTextCharacter(title)) continue
     const targetFiles = Array.isArray(item.targetFiles)
       ? [
           ...new Set(
@@ -120,7 +114,7 @@ function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
               .map((file) => file.replace(/\\/g, '/'))
               .filter(isSafeRepoFilePath),
           ),
-        ].slice(0, 64)
+        ].slice(0, SIGNAL_LIMITS.targetFiles)
       : []
     const approach = optPlanText(item.approach)
     const verification = optPlanText(item.verification)
@@ -140,13 +134,11 @@ function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
 function cleanApplied(v: unknown): AppliedImprovement[] | undefined {
   if (!Array.isArray(v)) return undefined
   const out: AppliedImprovement[] = []
-  for (const item of v.slice(0, 16)) {
+  for (const item of v) {
     if (!isRecord(item)) continue
     const id = optStr(item.id)
     const title = optStr(item.title)
     if (id === undefined || title === undefined) continue
-    if (!/^\d{1,4}$/.test(id) || title === '' || title.length > 200) continue
-    if (hasUnsafeTextCharacter(title)) continue
     if (!isStatus(item.status)) continue
     const impact = optStr(item.impact)
     const decisionReason = optStr(item.decisionReason)
@@ -161,13 +153,9 @@ function cleanApplied(v: unknown): AppliedImprovement[] | undefined {
       id,
       title,
       status: item.status,
-      ...(impact !== undefined && impact.length <= 1000 ? { impact } : {}),
-      ...(decisionReason !== undefined && decisionReason.length <= 1000
-        ? { decisionReason }
-        : {}),
-      ...(metricDelta !== undefined && metricDelta.length <= 500
-        ? { metricDelta }
-        : {}),
+      ...(impact !== undefined ? { impact } : {}),
+      ...(decisionReason !== undefined ? { decisionReason } : {}),
+      ...(metricDelta !== undefined ? { metricDelta } : {}),
       ...(files ? { files } : {}),
       ...(summary !== undefined ? { summary } : {}),
     })
@@ -176,14 +164,17 @@ function cleanApplied(v: unknown): AppliedImprovement[] | undefined {
 }
 
 /**
- * Parse-don't-validate gate for the agent→driver signal — the boundary twin of
- * `normalizeConfig`. The signal is untrusted JSON the agent wrote (and a crashed agent may write
- * half of it), so this is the single choke point that turns it into a trustworthy `Signal`.
+ * Structural decoding gate for the agent→driver signal — the boundary twin of `normalizeConfig`.
+ * The signal is untrusted JSON the agent wrote (and a crashed agent may write half of it), so this
+ * choke point accepts only values whose JSON types can form a trustworthy `Signal`.
  *
  * Hard fields (`iteration`/`phase`/`result`) must be valid or the whole signal is rejected
- * (returns null → the driver retries the phase in a fresh session). The optional batch fields are
- * CLEANED rather than rejected — malformed plan/applied items and non-numeric counts are dropped —
- * so one stray field never throws away an otherwise-usable signal.
+ * (returns null → the driver retries the phase in a fresh session). Optional values with the wrong
+ * JSON type are omitted, but well-typed text is never deleted for requiredness, length, unsafe
+ * characters, or id format: those are POLICY owned by `validateAnalyzeSignal` and
+ * `validateImproveSignal`. Keeping the supplied value lets those validators report its measured
+ * length and exact violation, instead of turning real agent evidence into a false "must report"
+ * reason that a fresh retry cannot act on.
  */
 export function normalizeSignal(raw: unknown): Signal | null {
   if (!isRecord(raw)) return null

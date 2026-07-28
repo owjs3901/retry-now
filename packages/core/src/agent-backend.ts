@@ -4,6 +4,7 @@ import type {
   Phase,
   PlannedImprovement,
   RetryNowConfig,
+  Signal,
 } from './types.ts'
 
 export type PhaseRunResult =
@@ -26,6 +27,13 @@ export interface PhaseInvocationRequest {
   readonly itemIndex?: number
   readonly reportPath?: string
   readonly timeoutMs?: number
+  /**
+   * Optional core-owned probe resolving to the phase's terminal signal once the agent has written
+   * it (else null). A native backend gates completion on THIS, not on session lifecycle events,
+   * because a child's turn goes idle while its own background sub-agents run and the prompt HTTP
+   * await is unreliable. `CliSpawnBackend` ignores it — process exit is authoritative.
+   */
+  readonly completionProbe?: () => Promise<Signal | null>
   readonly log: (line: string) => void
 }
 

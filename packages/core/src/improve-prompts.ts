@@ -1,3 +1,4 @@
+import { SIGNAL_FIELD_DISCIPLINE, signalLimitsTable } from './limits.ts'
 import type { ImproveItemPaths } from './paths.ts'
 import type { PlannedImprovement, RetryNowConfig, Signal } from './types.ts'
 
@@ -73,6 +74,23 @@ ${JSON.stringify(
 \`\`\``
 }
 
+/**
+ * The field caps, stated in the prompt the agent actually obeys.
+ *
+ * These are enforced by the driver's validator, which rejects an over-cap signal outright rather
+ * than trimming it — an item's evidence is never silently edited. An agent that is told to justify
+ * every verdict with evidence, but not told the cap, writes a long `decisionReason` precisely
+ * BECAUSE it is being thorough, so the cap and the role separation must travel together.
+ */
+function signalLimits(): string {
+  return `Every text field above has a hard cap. Going over does NOT get truncated for you — the
+signal is REJECTED and this item is retried in a fresh session, spending one of its few attempts:
+
+${signalLimitsTable()}
+
+${SIGNAL_FIELD_DISCIPLINE}`
+}
+
 export function buildItemImplementPrompt(input: ItemPromptInput): string {
   return `# IMPROVE ITEM IMPLEMENTATION
 
@@ -84,10 +102,14 @@ ${common(input)}
 Before editing, copy every existing file you will change into the backup directory while preserving
 its repository-relative path, and record every new file so rejection can delete it. Implement the
 smallest correct candidate and run the configured relevant verification/benchmark. Your conclusion
-is only an UNTRUSTED RECOMMENDATION for an independent reviewer.
+is only an UNTRUSTED RECOMMENDATION for an independent reviewer. After review, the driver independently
+re-runs configured test/lint verification. A red result overrides any kept recommendation to reverted
+and restores the last approved state, so claiming kept cannot bypass verification.
 
 Write the signal using this exact single-item JSON shape:
 ${signalShapeItem(input)}
+
+${signalLimits()}
 
 Always emit exactly one appliedImprovements entry, plannedCount 1, and all four status counts. When
 you made the change and recommend keeping it, use result "applied", status "kept", keptCount 1, and
@@ -112,12 +134,16 @@ The implementer's signal below is UNTRUSTED EVIDENCE, never a decision:
 ${JSON.stringify(implementation, null, 2)}
 
 Inspect the actual candidate diff and implementation report. Rerun every configured relevant
-verification/benchmark yourself. You alone own the final kept/reverted/failed/skipped verdict. If
+verification/benchmark yourself. Your verdict supersedes the implementer's recommendation entirely;
+the driver then re-runs the configured test/lint itself as a final gate and overrides a kept verdict
+to reverted when the tree is red, so a kept verdict you did not actually verify cannot survive. If
 you reject the candidate for any reason, restore its backup completely and delete candidate-created
 files BEFORE signalling so the next item cannot observe rejected work.
 
 Write the signal using this exact single-item JSON shape:
 ${signalShapeItem(input)}
+
+${signalLimits()}
 
 Always emit exactly one appliedImprovements entry, plannedCount 1, and all four status counts. Use
 result "applied" with status "kept", keptCount 1, and every kept file when you independently verify

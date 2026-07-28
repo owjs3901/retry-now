@@ -2,16 +2,15 @@ import { expect, test } from 'bun:test'
 
 import { AutoStartCoordinator } from '../auto-start.ts'
 
-/** A fake start whose loop only "takes hold" (activates) once `configReady` is true. */
+/** A fake start whose loop only "takes hold" (returns active=true) once `configReady` is true. */
 function harness() {
   const calls: string[] = []
-  const state = { configReady: false, active: false }
+  const state = { configReady: false }
   const coordinator = new AutoStartCoordinator({
     start: async (parentSessionID) => {
       calls.push(parentSessionID)
-      if (state.configReady) state.active = true
+      return state.configReady
     },
-    isActive: () => state.active,
     log: () => {},
   })
   return { coordinator, calls, state }
@@ -52,7 +51,6 @@ test('first run: command.executed no-ops until config exists, then a later idle 
   // When — command fires but config not ready → attempt runs, stays inactive, pending retained
   await h.coordinator.onCommandExecuted('ses_parent')
   expect(h.calls).toEqual(['ses_parent'])
-  expect(h.state.active).toBe(false)
 
   // an idle before config is ready: retries, still inactive, pending retained
   await h.coordinator.onIdle()

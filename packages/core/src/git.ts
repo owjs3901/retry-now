@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { lstat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
+import { SIGNAL_LIMITS } from './limits.ts'
 import { hasUnsafeTextCharacter } from './safe-text.ts'
 
 export { formatIterationCommitMessage } from './commit-message.ts'
@@ -56,7 +57,11 @@ export const runGit: GitRunner = (args, cwd) =>
 
 /** True only for a bounded, literal, repository-relative file path. */
 export function isSafeRepoFilePath(file: string): boolean {
-  if (file === '' || file.length > 500 || hasUnsafeTextCharacter(file)) {
+  if (
+    file === '' ||
+    file.length > SIGNAL_LIMITS.filePath ||
+    hasUnsafeTextCharacter(file)
+  ) {
     return false
   }
   const normalized = file.replace(/\\/g, '/')

@@ -10,7 +10,7 @@ import {
 } from '../improve-batch.ts'
 import { type ItemStageRun, runImproveBatch } from '../improve-runner.ts'
 import { readText, writeText } from '../io.ts'
-import { resolvePaths } from '../paths.ts'
+import { resolveImproveItemPaths, resolvePaths } from '../paths.ts'
 import type { RetryNowConfig, Signal } from '../types.ts'
 
 function config(): RetryNowConfig {
@@ -372,6 +372,111 @@ test('runner preserves unauthorized HEAD details from review', async () => {
       itemId: 'unsafe-review',
       expectedHead: 'expected',
       actualHead: 'actual',
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('runner preserves reviewed prefix when a later item fails', async () => {
+  // Given
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-improve-runner-'))
+  const paths = resolvePaths(root)
+  const reviewedItem = { id: '1', title: 'reviewed item' }
+  const failingItem = { id: '2', title: 'failing item' }
+  const planned = [reviewedItem, failingItem]
+  const reviewArtifacts = resolveImproveItemPaths(paths, 1, 0, 'review', '1')
+
+  try {
+    // When
+    const outcome = await runImproveBatch({
+      paths,
+      config: config(),
+      iteration: 1,
+      planned,
+      stateDirRel: '.retry-now',
+      scope: '',
+      log: () => undefined,
+      execute: async (run) => {
+        if (run.item.id === '2') {
+          return {
+            kind: 'failed',
+            repository: 'approved',
+            reason: 'signal validation failed',
+          }
+        }
+        const reviewed = itemSignal(run, 'kept')
+        await writeText(run.artifacts.report, `${run.stage} report`)
+        return { kind: 'ok', signal: reviewed }
+      },
+    })
+
+    // Then
+    expect<unknown>(outcome).toEqual({
+      kind: 'failed',
+      stage: 'implement',
+      itemId: '2',
+      itemIndex: 1,
+      reason: 'signal validation failed',
+      repository: 'approved',
+      reviews: [
+        {
+          ...itemSignal(
+            {
+              role: 'review',
+              stage: 'review',
+              item: reviewedItem,
+              itemIndex: 0,
+              artifacts: reviewArtifacts,
+              message: '',
+            },
+            'kept',
+          ),
+          report: reviewArtifacts.report,
+        },
+      ],
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('runner identifies a review failure without adopting its implementation', async () => {
+  // Given
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-improve-runner-'))
+  const paths = resolvePaths(root)
+
+  try {
+    // When
+    const outcome = await runImproveBatch({
+      paths,
+      config: config(),
+      iteration: 1,
+      planned: [{ id: '1', title: 'failing review' }],
+      stateDirRel: '.retry-now',
+      scope: '',
+      log: () => undefined,
+      execute: (run) =>
+        Promise.resolve(
+          run.stage === 'implement'
+            ? { kind: 'ok', signal: itemSignal(run, 'kept') }
+            : {
+                kind: 'failed',
+                repository: 'unknown',
+                reason: 'review crashed',
+              },
+        ),
+    })
+
+    // Then
+    expect<unknown>(outcome).toEqual({
+      kind: 'failed',
+      stage: 'review',
+      itemId: '1',
+      itemIndex: 0,
+      reviews: [],
+      repository: 'unknown',
+      reason: 'review crashed',
     })
   } finally {
     await rm(root, { recursive: true, force: true })

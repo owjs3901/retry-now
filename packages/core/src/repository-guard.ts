@@ -33,10 +33,15 @@ function snapshotChanges(
   after: RepositorySnapshot,
 ): string[] {
   const changed = repositoryDelta(before, after)
-  if (
-    before.indexTree !== after.indexTree ||
-    !before.indexFile.equals(after.indexFile)
-  ) {
+  // Flag the index only when its STAGED TREE changed — not when only the raw `.git/index` bytes
+  // differ. Git rewrites the index's stat-cache (mtime/inode/size) opportunistically whenever any
+  // command touches the repo (editor/LSP indexing, `git status`, a background `cargo`…), which
+  // leaves the staged tree byte-for-byte identical. In native (in-process) mode the ANALYZE child
+  // runs INSIDE the live opencode instance (LSP on), so that benign stat-cache churn is unavoidable
+  // and must NOT be mistaken for an ANALYZE mutation. The IMPROVE stage already compares `indexTree`
+  // alone (improve-stage.ts:114); this aligns ANALYZE with it. `indexTree` still catches every real
+  // staged change, and `indexFile` is still used for exact restoration + capture-consistency.
+  if (before.indexTree !== after.indexTree) {
     changed.unshift('Git index')
   }
   return changed

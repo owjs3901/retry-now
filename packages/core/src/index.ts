@@ -39,6 +39,8 @@ export {
   buildFrontend,
   buildFrontendBody,
   buildPluginCommandFile,
+  buildPluginStatusCommandFile,
+  buildPluginStopCommandFile,
   type FrontendFile,
   type FrontendInstallResult,
   installFrontend,

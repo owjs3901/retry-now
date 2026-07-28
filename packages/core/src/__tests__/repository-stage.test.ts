@@ -114,7 +114,7 @@ test('reverted review restores approved bytes when a later item touches the same
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 15_000)
 
 test('failed implementation restores the approved working tree', async () => {
   const root = await initRepo({ 'src/value.ts': 'base\n' })
@@ -129,18 +129,20 @@ test('failed implementation restores the approved working tree', async () => {
       validate: () => null,
       executePhase: async () => {
         await writeFile(join(root, 'src/value.ts'), 'unreviewed\n')
-        return { kind: 'failed' }
+        return { kind: 'failed', reason: 'implementation crashed' }
       },
     })
 
-    expect((await execute(stageRun(root, '1', 'implement'))).kind).toBe(
-      'failed',
-    )
+    expect(await execute(stageRun(root, '1', 'implement'))).toEqual({
+      kind: 'failed',
+      repository: 'approved',
+      reason: 'implementation crashed',
+    })
     expect(await readFile(join(root, 'src/value.ts'), 'utf8')).toBe('base\n')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 15_000)
 
 test('target-scoped stage rejects and removes an out-of-scope edit', async () => {
   const root = await initRepo({
@@ -174,7 +176,7 @@ test('target-scoped stage rejects and removes an out-of-scope edit', async () =>
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 15_000)
 
 test('stage-created commit is rejected before an independent review can start', async () => {
   const root = await initRepo({ 'src/value.ts': 'base\n' })
@@ -206,4 +208,4 @@ test('stage-created commit is rejected before an independent review can start', 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 15_000)

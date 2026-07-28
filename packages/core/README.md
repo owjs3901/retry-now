@@ -45,15 +45,19 @@ The engine is dependency-light and runs on **[Bun](https://bun.sh)** ≥ 1.1.
 
 Each iteration starts with a brand-new ANALYZE session. It reads the code, produces a batch plan of
 independently revertible items, then the driver runs a fresh implementation session and a separate
-fresh review session for each item. Only reviewed outcomes are recorded. Analysis, implementation,
-and review may each select a different CLI agent, model, and variant. The loop
+fresh review session for each item. A review's kept verdict is a recommendation: the driver independently
+re-runs configured test/lint before advancing the approved snapshot and reverts only that item on failure.
+Only driver-gated outcomes are recorded. Analysis, implementation, and review may each select a different
+CLI agent, model, and variant. The loop
 stops only when several consecutive lives honestly find nothing left to improve.
 
 Repository transactions cover **Git-visible files only**: tracked files, non-ignored untracked files,
-symlinks, modes, and exact raw index bytes. Git-ignored files are outside the restore boundary. ANALYZE
-mutations are restored by the driver, ordinary mid-batch aborts restore the full iteration start, and an
-agent-created commit is left untouched while a project-level HEAD quarantine blocks reruns. Repositories
-containing submodule/gitlink entries are rejected before an agent is launched.
+symlinks, and modes. The approved index is restored from its exact captured bytes, then verified by HEAD,
+the staged tree, and file contents, modes, and symlinks; post-restoration raw index bytes may differ because
+Git regenerates its stat cache. Git-ignored files are outside the restore boundary. ANALYZE mutations are
+restored by the driver, ordinary mid-batch aborts restore the full iteration start, and an agent-created commit
+is left untouched while a project-level HEAD quarantine blocks reruns. Repositories containing submodule/gitlink
+entries are rejected before an agent is launched.
 
 See the **[main README](https://github.com/owjs3901/retry-now#readme)** for the full model, the
 convergence rules, and configuration.
