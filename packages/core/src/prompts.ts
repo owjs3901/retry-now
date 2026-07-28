@@ -8,7 +8,7 @@
  *   - the UNBIASED-ANALYZE rule (no reading of prior reports/ledger/history/state),
  *   - the bounded BATCH-PLAN discipline (one fresh analysis amortised over up to
  *     `improvementBatchSize` independently-revertible items),
- *   - the per-item backup -> implement -> checkpoint-verify -> revert-on-regression safety gate,
+ *   - the per-item backup -> implement -> independent review -> revert-on-regression safety gate,
  *   - the exact signal JSON contract.
  *
  * `stateDir` is the on-disk dir the agent reads/writes state from — `.retry-now` for a
@@ -17,6 +17,7 @@
  * to a single package path. These prompts are sent to the agent every reincarnation, so they
  * are written in English (fewer tokens than Korean); the user-facing CLI/theme stay Korean.
  */
+import { SIGNAL_FIELD_DISCIPLINE, signalLimitsTable } from './limits.ts'
 import { DIR } from './paths.ts'
 import type { RetryNowConfig } from './types.ts'
 
@@ -223,6 +224,13 @@ ${signalShapeAnalyze(stateDir)}
   = \`[]\`.
 - \`plannedImprovements\` lists EVERY item from your \`## BATCH PLAN\`, same ids and order (1..${config.improvementBatchSize}
   max); \`nextImprovement\` repeats item 1's title for backward compatibility.
+
+Every text field in that signal has a hard cap. Going over does NOT get truncated for you — the
+signal is REJECTED and this phase is retried in a fresh session, spending one of its few attempts:
+
+${signalLimitsTable()}
+
+${SIGNAL_FIELD_DISCIPLINE}
 `
 }
 
@@ -281,30 +289,28 @@ items (e.g. dead-code removal) with no measurable runtime effect, say so.`
     config.verifyEnabled &&
     (config.verifyTest !== '' || config.verifyLint !== '')
   const verifyBlock = hasVerify
-    ? `## 3b. Step 3 — verify in CHECKPOINT GROUPS (REQUIRED)
+    ? `## 3b. Step 3 — verify PER ITEM (REQUIRED)
 
 These EXACT commands are this iteration's completion check:
 ${config.verifyTest ? `- test: \`${config.verifyTest}\`\n` : ''}${config.verifyLint ? `- lint: \`${config.verifyLint}\`\n` : ''}
-Do NOT run them after every single item (that throws away the whole point of batching one analysis)
-and do NOT run them only once at the very end (a late failure then makes isolating the culprit
-expensive). Instead CHECKPOINT after every 2 applied items, and once more after the final item:
+The driver executes every plan item as its OWN pair of fresh sessions: one to implement it, then a
+SEPARATE independent session to review it. That reviewer re-runs the commands above ITSELF and owns
+the final verdict, so an item reaches \`kept\` only on evidence the reviewer gathered first-hand —
+never on the implementer's recommendation.
 
-1. Apply up to 2 items (per section 2), each backed up separately under \`item-<id>/\`.
-2. Run the commands above ONCE for that group.
-   - GREEN → those items are LOCKED IN as \`kept\`. Continue to the next group.
-   - RED → restore ONLY this group's unverified items from their \`item-<id>/\` backups, in REVERSE
-     order, then re-run the commands to confirm GREEN again. Mark each rolled-back item
-     \`reverted\` (a working change you could not keep) or \`failed\` (could not be made to work).
-     Items LOCKED IN by an earlier GREEN checkpoint stay \`kept\` — never undo them.
-3. After the last group the working tree MUST be GREEN. Never leave it red.
+Run the commands for the item in front of you before handing it over:
+- GREEN → recommend \`kept\` and report exactly the files that item changed.
+- RED → restore THAT item from its \`item-<id>/\` backup, re-run to confirm GREEN again, and mark it
+  \`reverted\` (a working change that could not be kept) or \`failed\` (could not be made to work).
 
-KEEP an item only when the checkpoint group containing it passed every command above.`
-    : `## 3b. Step 3 — verify in CHECKPOINT GROUPS (no automated test/lint configured)
+Never hand over a red tree: each item starts from the green, reviewed state the previous item left.`
+    : `## 3b. Step 3 — verify PER ITEM (no automated test/lint configured)
 
 This project has no test/lint command configured for the loop (the user accepted proceeding
-without one). After every 2 items (and after the final item), re-read those items and the
-directly-related code: keep an item only if it is correct and self-consistent, otherwise restore it
-from its \`item-<id>/\` backup and mark it \`reverted\`/\`failed\`. Leave the working tree consistent.`
+without one). The driver still runs each item as a fresh implementation session followed by a
+SEPARATE independent review session. For the item in front of you, re-read it and the directly
+related code: keep it only if it is correct and self-consistent, otherwise restore it from its
+\`item-<id>/\` backup and mark it \`reverted\`/\`failed\`. Leave the working tree consistent.`
   return `# IMPROVE PHASE — retry-now
 
 You are a FRESH session with NO memory of prior iterations. This phase runs only because the
@@ -365,8 +371,8 @@ Work the plan items in order. For EACH item \`<id>\`:
 - If a LATER item turns out to be already satisfied or invalidated by an EARLIER kept item, do
   NOT force it — mark it \`skipped\` and move on.
 
-Verification is grouped (next section) so you do not pay a full test+lint run after every single
-item; never collapse multiple items into one to dodge that.
+Verification happens per item (next section), and an independent reviewer repeats it before the
+item counts as kept; never collapse multiple items into one to dodge that.
 
 ---
 
@@ -459,5 +465,12 @@ ${signalShapeImprove(stateDir)}
 - \`keptCount\`/\`revertedCount\`/\`failedCount\`/\`skippedCount\` MUST match \`appliedImprovements\`.
 - \`metricDelta\` is the benchmark item's measured delta, or a short batch note, or \`"none"\`.
 - \`iteration\` MUST equal \`current.json\`.
+
+Every text field in that signal has a hard cap. Going over does NOT get truncated for you — the
+signal is REJECTED and the work is retried in a fresh session, spending one of its few attempts:
+
+${signalLimitsTable()}
+
+${SIGNAL_FIELD_DISCIPLINE}
 `
 }

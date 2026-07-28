@@ -4,6 +4,11 @@ import {
   buildItemImplementPrompt,
   buildItemReviewPrompt,
 } from '../improve-prompts.ts'
+import {
+  SIGNAL_FIELD_DISCIPLINE,
+  SIGNAL_LIMITS,
+  signalLimitsTable,
+} from '../limits.ts'
 import type { ImproveItemPaths } from '../paths.ts'
 import { normalizeSignal } from '../signal.ts'
 import type { PlannedImprovement, RetryNowConfig, Signal } from '../types.ts'
@@ -172,4 +177,25 @@ test('item prompts render benchmark and direct-inspection verification branches'
   // Then
   expect(implementPrompt).toContain('- no configured command; inspect directly')
   expect(reviewPrompt).toContain('- benchmark: `bun run bench` (5 runs')
+})
+
+/**
+ * These per-item prompts — NOT the generated `prompts/improve.md` — are what an IMPROVE session
+ * actually reads: the driver's per-item invocation says "Read and obey <items/…>.prompt.md". The
+ * incident that motivated this test had the caps documented nowhere the agent could see, so the
+ * agent overran `decisionReason` while faithfully following the instruction to justify its verdict.
+ */
+test('item prompts state every field cap the driver enforces', () => {
+  for (const prompt of [
+    buildItemImplementPrompt(input()),
+    buildItemReviewPrompt(input(), IMPLEMENTATION),
+  ]) {
+    expect(prompt).toContain(signalLimitsTable())
+    expect(prompt).toContain(SIGNAL_FIELD_DISCIPLINE)
+    expect(prompt).toContain('hard cap')
+    expect(prompt).toContain('REJECTED')
+    for (const cap of Object.values(SIGNAL_LIMITS)) {
+      expect(prompt).toContain(String(cap))
+    }
+  }
 })

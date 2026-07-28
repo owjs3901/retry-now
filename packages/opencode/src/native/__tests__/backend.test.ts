@@ -8,6 +8,7 @@ import type {
   PhaseInvocationRequest,
   PhaseRunResult,
   RetryNowConfig,
+  Signal,
 } from '@retry-now/core'
 import { expect, test } from 'bun:test'
 
@@ -148,6 +149,7 @@ test('creates a context-zero child and prompts only that new session', async () 
         path: { id: 'fresh-child' },
         query: { directory },
         body: {
+          agent: 'build',
           parts: [{ type: 'text', text: 'fresh phase instructions' }],
         },
       },
@@ -179,7 +181,7 @@ test('maps a parseable model and agent profile into the prompt body', async () =
   })
 })
 
-test('omits model and agent when their configured values are unusable', async () => {
+test('omits an unparseable model but pins the clean build agent when no profile is set', async () => {
   await withBackend(async ({ client, backend, logPath }) => {
     // Given
     const invocation = request(logPath, {
@@ -190,8 +192,10 @@ test('omits model and agent when their configured values are unusable', async ()
     // When
     await backend.run(invocation)
 
-    // Then
+    // Then — an unparseable model is dropped, but an empty agentProfile pins `build` (never falls
+    // through to the curated default agent) so the reincarnation stays context-zero.
     expect(client.promptCalls[0]?.body).toEqual({
+      agent: 'build',
       parts: [{ type: 'text', text: 'fresh phase instructions' }],
     })
   })
@@ -424,5 +428,174 @@ test('maps an aborted prompt to aborted when the active loop is stopping', async
     // Then
     expect(result).toEqual({ kind: 'aborted' })
     expect(client.abortCalls).toHaveLength(1)
+  })
+})
+
+function terminalSignal(): Signal {
+  return {
+    iteration: 1,
+    phase: 'analyze',
+    result: 'improvements_found',
+    report: '.retry-now/reports/0001-analyze.md',
+    summary: '',
+    timestamp: '2026-07-20T00:00:00.000Z',
+  }
+}
+
+test('an intermediate idle while sub-agents run does not complete the phase; the signal does', async () => {
+  await withBackend(async ({ client, controller, backend, logPath }) => {
+    // Given: the prompt never settles (models the undici hang) and no signal is written yet.
+    let signalReady = false
+    client.promptImplementation = () => new Promise(() => undefined)
+    const running = backend.run(
+      request(logPath, {
+        timeoutMs: 5_000,
+        completionProbe: async () => (signalReady ? terminalSignal() : null),
+      }),
+    )
+    await Bun.sleep(20)
+
+    // When: the child goes idle while its own background sub-agents are still running — the OLD
+    // backend completed here prematurely, before the signal was written.
+    controller.handleEvent({
+      type: 'session.idle',
+      properties: { sessionID: 'child-1' },
+    })
+
+    // Then: still running — an intermediate idle must NOT complete the phase.
+    const early = await Promise.race([
+      running.then((value) => ({ done: true, value }) as const),
+      Bun.sleep(150).then(() => ({ done: false }) as const),
+    ])
+    expect(early.done).toBe(false)
+
+    // When: the child finishes its next turn, writes the terminal signal, and goes idle again.
+    signalReady = true
+    controller.handleEvent({
+      type: 'session.idle',
+      properties: { sessionID: 'child-1' },
+    })
+
+    // Then: only now does the phase complete.
+    expect(await running).toEqual({ kind: 'exit', code: 0 })
+  })
+})
+
+test('the signal poll latches success without any idle or prompt settlement', async () => {
+  await withBackend(async ({ client, backend, logPath }) => {
+    // Given: the prompt hangs and no lifecycle event ever fires — only the file appears.
+    let signalReady = false
+    client.promptImplementation = () => new Promise(() => undefined)
+    const running = backend.run(
+      request(logPath, {
+        timeoutMs: 5_000,
+        completionProbe: async () => (signalReady ? terminalSignal() : null),
+      }),
+    )
+    await Bun.sleep(20)
+    signalReady = true
+
+    // Then: the periodic signal poll picks it up on its own.
+    expect(await running).toEqual({ kind: 'exit', code: 0 })
+  })
+})
+
+test('a terminal signal already written wins over a later benign session.error', async () => {
+  await withBackend(async ({ client, controller, backend, logPath }) => {
+    // Given: the signal is already present when an error arrives.
+    client.promptImplementation = () => new Promise(() => undefined)
+    const running = backend.run(
+      request(logPath, {
+        timeoutMs: 5_000,
+        completionProbe: async () => terminalSignal(),
+      }),
+    )
+    await Bun.sleep(20)
+
+    // When: a session.error arrives after the work is already done.
+    controller.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'child-1',
+        error: { name: 'UnknownError', data: { message: 'benign late error' } },
+      },
+    })
+
+    // Then: success — completed work is preferred, and the child is not aborted.
+    expect(await running).toEqual({ kind: 'exit', code: 0 })
+    expect(client.abortCalls).toHaveLength(0)
+  })
+})
+
+test('a signal present at the deadline wins over a timeout failure', async () => {
+  await withBackend(async ({ client, backend, logPath }) => {
+    // Given: the prompt hangs, the deadline is shorter than one poll interval, and the signal is
+    // already written.
+    client.promptImplementation = () => new Promise(() => undefined)
+    const running = backend.run(
+      request(logPath, {
+        timeoutMs: 60,
+        completionProbe: async () => terminalSignal(),
+      }),
+    )
+
+    // Then: the deadline's final probe sees the signal → success, no abort.
+    expect(await running).toEqual({ kind: 'exit', code: 0 })
+    expect(client.abortCalls).toHaveLength(0)
+  })
+})
+
+test('a hard error with no signal and a failed abort returns aborted (non-retryable containment)', async () => {
+  await withBackend(async ({ client, controller, backend, logPath }) => {
+    // Given: no signal is ever written, the prompt hangs, and abort cannot be confirmed.
+    client.promptImplementation = () => new Promise(() => undefined)
+    client.abortImplementation = async () => success(false)
+    const running = backend.run(
+      request(logPath, {
+        timeoutMs: 5_000,
+        completionProbe: async () => null,
+      }),
+    )
+    await Bun.sleep(20)
+
+    // When: a non-quota session.error arrives and containment cannot be confirmed.
+    controller.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'child-1',
+        error: { name: 'UnknownError', data: { message: 'provider crashed' } },
+      },
+    })
+
+    // Then: aborted — runPhaseResilient must NOT retry over a possibly-live child.
+    expect(await running).toEqual({ kind: 'aborted' })
+  })
+})
+
+test('a failed native session records the human-readable error reason in the phase log', async () => {
+  await withBackend(async ({ client, controller, backend, logPath }) => {
+    // Given: the prompt hangs and a non-quota session.error arrives shaped like an opencode SDK
+    // error record ({ name, data: { message } }) — the exact shape a bare String() mangles.
+    client.promptImplementation = () => new Promise(() => undefined)
+    const running = backend.run(request(logPath, { timeoutMs: 1_000 }))
+    await Bun.sleep(20)
+
+    // When
+    controller.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'child-1',
+        error: {
+          name: 'ProviderError',
+          data: { message: 'model unavailable' },
+        },
+      },
+    })
+    await running
+
+    // Then: the phase log carries WHY it failed, not an opaque `[object Object]`.
+    const log = await readFile(logPath, 'utf8')
+    expect(log).toContain('ProviderError: model unavailable')
+    expect(log).not.toContain('[object Object]')
   })
 })

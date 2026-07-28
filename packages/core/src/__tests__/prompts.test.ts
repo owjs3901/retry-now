@@ -17,6 +17,11 @@
  */
 import { expect, test } from 'bun:test'
 
+import {
+  SIGNAL_FIELD_DISCIPLINE,
+  SIGNAL_LIMITS,
+  signalLimitsTable,
+} from '../limits.ts'
 import { buildAnalyzePrompt, buildImprovePrompt } from '../prompts.ts'
 import type { RetryNowConfig } from '../types.ts'
 
@@ -237,4 +242,42 @@ test('improve prompt delegates commits to the driver and requires detailed per-i
     'EVERY kept item MUST include all and only its changed regular files',
   )
   expect(out).toContain('pre-existing-dirty')
+})
+
+/**
+ * The incident this guards: an agent wrote a 1363-character `decisionReason` against an
+ * undocumented 1000-character cap and the whole 50-iteration run died. The caps were enforced in
+ * code and stated NOWHERE in the generated prompts, so the invariant was unsatisfiable by
+ * construction. These tests make the prompts and the enforced constants provably the same numbers.
+ */
+test('every cap in SIGNAL_LIMITS is rendered into the shared table', () => {
+  // Given the single source of truth
+  const table = signalLimitsTable()
+
+  // Then adding a cap without giving it a row fails here, which is what keeps the two in sync
+  for (const cap of Object.values(SIGNAL_LIMITS)) {
+    expect(table).toContain(String(cap))
+  }
+})
+
+test('analyze and improve prompts embed the field-cap table and the report/signal split', () => {
+  for (const out of [buildAnalyzePrompt(cfg()), buildImprovePrompt(cfg())]) {
+    expect(out).toContain(signalLimitsTable())
+    expect(out).toContain(SIGNAL_FIELD_DISCIPLINE)
+    // The prompt must state the real consequence: rejection, not a silent courtesy trim.
+    expect(out).toContain('hard cap')
+    expect(out).toContain('does NOT get truncated for you')
+    expect(out).toContain('REJECTED')
+  }
+})
+
+test('the improve prompt describes the per-item review the driver actually runs', () => {
+  // The driver executes one implement session + one INDEPENDENT review session per item; the
+  // prompt used to describe checkpoint groups of two, a workflow nothing in the runner performs.
+  const out = buildImprovePrompt(cfg())
+
+  expect(out).toContain('verify PER ITEM')
+  expect(out).toContain('SEPARATE independent session to review it')
+  expect(out).not.toContain('CHECKPOINT GROUPS')
+  expect(out).not.toContain('LOCKED IN')
 })

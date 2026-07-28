@@ -13,7 +13,14 @@ import { runGit } from '../git.ts'
 import { readJson, writeJson, writeText } from '../io.ts'
 import { runAgent, runLoop } from '../loop-driver.ts'
 import { resolveImproveItemPaths, resolvePaths } from '../paths.ts'
-import type { RetryNowConfig, Signal } from '../types.ts'
+import type { CommandRunner, RetryNowConfig, Signal } from '../types.ts'
+
+/**
+ * A green verification baseline. These tests configure `verifyTest: 'bun test'`, so without this
+ * stub the driver's baseline preflight would spawn a real shell and re-enter this very suite.
+ * Preflight behaviour itself is covered by `preflight.test.ts`.
+ */
+const GREEN_BASELINE: CommandRunner = () => Promise.resolve(0)
 
 class FakeBackend implements AgentBackend {
   readonly calls: PhaseInvocationRequest[] = []
@@ -160,6 +167,7 @@ test('backend receives each fresh phase invocation with its role, title, and mes
       {
         cwd: root,
         dryRun: false,
+        commandRunner: GREEN_BASELINE,
         waitForQuota: false,
         backend,
         log: () => undefined,
@@ -212,6 +220,7 @@ test('every phase invocation carries config.phaseTimeoutMs as the request timeou
       {
         cwd: root,
         dryRun: false,
+        commandRunner: GREEN_BASELINE,
         waitForQuota: false,
         backend,
         log: () => undefined,
@@ -237,6 +246,7 @@ test('backend quota result pauses the loop without spending crash retries', asyn
     const result = await runLoop(config(), {
       cwd: root,
       dryRun: false,
+      commandRunner: GREEN_BASELINE,
       waitForQuota: false,
       backend,
       log: () => undefined,
@@ -264,6 +274,7 @@ test('backend nonzero exit without a valid signal exhausts phase attempts', asyn
     const result = await runLoop(config(), {
       cwd: root,
       dryRun: false,
+      commandRunner: GREEN_BASELINE,
       waitForQuota: false,
       backend,
       log: () => undefined,
@@ -289,6 +300,7 @@ test('backend aborted result stops the loop cleanly', async () => {
     const result = await runLoop(config(), {
       cwd: root,
       dryRun: false,
+      commandRunner: GREEN_BASELINE,
       waitForQuota: false,
       backend,
       log: () => undefined,
@@ -326,6 +338,7 @@ test('ANALYZE restoration log lists at most ten changed paths', async () => {
     const result = await runLoop(config(), {
       cwd: root,
       dryRun: false,
+      commandRunner: GREEN_BASELINE,
       waitForQuota: false,
       backend,
       log: (line) => logs.push(line),
@@ -521,6 +534,68 @@ test('HEAD quarantine auto-clears only after the expected revision is restored',
 
     expect(result.status).toBe('stopped-maxiter')
     expect(await Bun.file(paths.headQuarantine).exists()).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('a red verification baseline refuses to start and spawns no life at all', async () => {
+  // Given a repository whose configured lint command already fails at HEAD — the reporter's exact
+  // situation. Every item would be reverted for a failure it did not cause, nothing would ever be
+  // kept, and the run would end by announcing convergence. The loop must not start.
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-preflight-red-'))
+  const backend = new FakeBackend(() =>
+    Promise.resolve({ kind: 'exit' as const, code: 0 }),
+  )
+  const logs: string[] = []
+
+  try {
+    await initializeRepository(root)
+
+    // When
+    const result = await runLoop(config(), {
+      cwd: root,
+      dryRun: false,
+      commandRunner: (command) =>
+        Promise.resolve(command.includes('lint') ? 1 : 0),
+      waitForQuota: false,
+      backend,
+      log: (line) => logs.push(line),
+    })
+
+    // Then
+    expect(result.status).toBe('error')
+    expect(result.iterations).toBe(0)
+    // No agent session was created: refusing after burning a life would defeat the point.
+    expect(backend.calls).toHaveLength(0)
+    // The user is told what is red and what it would have caused.
+    expect(logs.join('\n')).toContain('시작 거부')
+    expect(logs.join('\n')).toContain('bun run lint')
+    expect(logs.join('\n')).toContain('맺어졌다')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('a green verification baseline lets the loop proceed normally', async () => {
+  // The guard must not become a new way for the loop to refuse to work.
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-preflight-green-'))
+  const backend = new FakeBackend(() => Promise.resolve({ kind: 'quota' }))
+
+  try {
+    await initializeRepository(root)
+
+    const result = await runLoop(config(), {
+      cwd: root,
+      dryRun: false,
+      commandRunner: GREEN_BASELINE,
+      waitForQuota: false,
+      backend,
+      log: () => undefined,
+    })
+
+    expect(result.status).toBe('paused-quota')
+    expect(backend.calls.length).toBeGreaterThan(0)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

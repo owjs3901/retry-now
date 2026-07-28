@@ -1,5 +1,6 @@
 import { headRevision } from './git.ts'
 import type { ItemStageOutcome, ItemStageRun } from './improve-runner.ts'
+import { SIGNAL_LIMITS } from './limits.ts'
 import type { Paths } from './paths.ts'
 import {
   captureRepositorySnapshot,
@@ -9,6 +10,7 @@ import {
   restoreRepositorySnapshot,
   validateRepositoryDelta,
 } from './repository-snapshot.ts'
+import { oneLine } from './safe-text.ts'
 import type { Signal } from './types.ts'
 
 export type StagePhaseExecutor = (
@@ -16,7 +18,12 @@ export type StagePhaseExecutor = (
   validate: (signal: Signal) => string | null,
   retryGuard: () => Promise<string | null>,
   run: ItemStageRun,
-) => Promise<ItemStageOutcome>
+) => Promise<
+  | { readonly kind: 'ok'; readonly signal: Signal }
+  | { readonly kind: 'quota' }
+  | { readonly kind: 'aborted' }
+  | { readonly kind: 'failed'; readonly reason: string }
+>
 
 type ImproveStageRepository = {
   readonly capture: typeof captureRepositorySnapshot
@@ -40,6 +47,7 @@ type ImproveStageExecutorInput = {
   readonly initialSnapshot?: RepositorySnapshot
   readonly log: (line: string) => void
   readonly validate: (signal: Signal, run: ItemStageRun) => string | null
+  readonly verifyKept?: () => Promise<string | null>
   readonly executePhase: StagePhaseExecutor
   readonly repository?: ImproveStageRepository
 }
@@ -48,29 +56,53 @@ export function createImproveStageExecutor(
   input: ImproveStageExecutorInput,
 ): (run: ItemStageRun) => Promise<ItemStageOutcome> {
   const repository = input.repository ?? DEFAULT_REPOSITORY
-  let approvedSnapshot: RepositorySnapshot | null =
-    input.initialSnapshot ?? null
+  let approvedSnapshot = input.initialSnapshot ?? null
   let stageSnapshot: RepositorySnapshot | null = input.initialSnapshot ?? null
 
-  async function restoreApproved(run: ItemStageRun): Promise<boolean> {
-    if (approvedSnapshot === null) return false
-    let issue: string | null
+  function failed(
+    reason: string,
+    repositoryState: 'approved' | 'unknown',
+  ): ItemStageOutcome {
+    return repositoryState === 'approved'
+      ? { kind: 'failed', repository: 'approved', reason }
+      : { kind: 'failed', repository: 'unknown', reason }
+  }
+
+  async function restoreApproved(
+    run: ItemStageRun,
+  ): Promise<'approved' | 'unknown'> {
+    if (approvedSnapshot === null) return 'unknown'
     try {
-      issue = await repository.restoreSnapshot(
+      const issue = await repository.restoreSnapshot(
         input.paths.root,
         approvedSnapshot,
       )
+      if (issue !== null) {
+        input.log(`  ! item ${run.item.id} rollback failed — ${issue}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       input.log(`  ! item ${run.item.id} rollback threw — ${message}`)
-      return false
     }
-    if (issue === null) {
-      stageSnapshot = approvedSnapshot
-      return true
+
+    let current: RepositorySnapshot | null
+    try {
+      current = await repository.capture(input.paths.root)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      input.log(`  ! item ${run.item.id} rollback proof threw — ${message}`)
+      return 'unknown'
     }
-    input.log(`  ! item ${run.item.id} rollback failed — ${issue}`)
-    return false
+    if (
+      current === null ||
+      current.head !== approvedSnapshot.head ||
+      current.indexTree !== approvedSnapshot.indexTree ||
+      repositoryDelta(approvedSnapshot, current).length !== 0
+    ) {
+      return 'unknown'
+    }
+    stageSnapshot = current
+    return 'approved'
   }
 
   return async (run) => {
@@ -80,12 +112,15 @@ export function createImproveStageExecutor(
       signal: run.artifacts.signal,
     }
     if (input.dryRun) {
-      return input.executePhase(
+      const outcome = await input.executePhase(
         stagePaths,
         (signal) => input.validate(signal, run),
         () => Promise.resolve(null),
         run,
       )
+      return outcome.kind === 'failed'
+        ? failed(outcome.reason, 'unknown')
+        : outcome
     }
 
     if (approvedSnapshot === null) {
@@ -95,7 +130,7 @@ export function createImproveStageExecutor(
     const before = stageSnapshot
     if (approvedSnapshot === null || before === null) {
       input.log(`  ! item ${run.item.id} repository snapshot is unavailable`)
-      return { kind: 'failed' }
+      return failed('repository snapshot is unavailable', 'unknown')
     }
 
     const stageHead = before.head
@@ -147,7 +182,7 @@ export function createImproveStageExecutor(
     if (actualHead !== stageHead) {
       input.log(`  ! item ${run.item.id} ${run.stage} changed Git HEAD`)
       return actualHead === null
-        ? { kind: 'failed' }
+        ? failed('Git HEAD is unavailable after the item stage', 'unknown')
         : {
             kind: 'head-changed',
             expectedHead: stageHead,
@@ -155,7 +190,16 @@ export function createImproveStageExecutor(
           }
     }
     if (outcome.kind !== 'ok') {
-      return (await restoreApproved(run)) ? outcome : { kind: 'failed' }
+      const repositoryState = await restoreApproved(run)
+      if (outcome.kind === 'failed') {
+        return failed(outcome.reason, repositoryState)
+      }
+      return repositoryState === 'approved'
+        ? outcome
+        : failed(
+            `could not prove the approved repository after ${outcome.kind}`,
+            'unknown',
+          )
     }
 
     let indexIssue: string | null
@@ -164,21 +208,27 @@ export function createImproveStageExecutor(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       input.log(`  ! item ${run.item.id} index restoration threw — ${message}`)
-      await restoreApproved(run)
-      return { kind: 'failed' }
+      return failed(
+        `index restoration threw: ${message}`,
+        await restoreApproved(run),
+      )
     }
     if (indexIssue !== null) {
       input.log(
         `  ! item ${run.item.id} index restoration failed — ${indexIssue}`,
       )
-      await restoreApproved(run)
-      return { kind: 'failed' }
+      return failed(
+        `index restoration failed: ${indexIssue}`,
+        await restoreApproved(run),
+      )
     }
 
     const current = await repository.capture(input.paths.root)
     if (current === null) {
-      await restoreApproved(run)
-      return { kind: 'failed' }
+      return failed(
+        'repository snapshot is unavailable after index restoration',
+        await restoreApproved(run),
+      )
     }
     if (run.stage === 'implement') {
       const changed = repositoryDelta(approvedSnapshot, current)
@@ -192,8 +242,7 @@ export function createImproveStageExecutor(
         input.log(
           `  ! item ${run.item.id} implementation escaped scope — ${issue}`,
         )
-        await restoreApproved(run)
-        return { kind: 'failed' }
+        return failed(issue, await restoreApproved(run))
       }
       stageSnapshot = current
       return outcome
@@ -201,7 +250,12 @@ export function createImproveStageExecutor(
 
     const review = outcome.signal.appliedImprovements?.[0]
     if (review?.status !== 'kept') {
-      return (await restoreApproved(run)) ? outcome : { kind: 'failed' }
+      return (await restoreApproved(run)) === 'approved'
+        ? outcome
+        : failed(
+            'could not prove the approved repository after rejected review',
+            'unknown',
+          )
     }
     const issue = validateRepositoryDelta(
       review.files ?? [],
@@ -211,8 +265,44 @@ export function createImproveStageExecutor(
     )
     if (issue !== null) {
       input.log(`  ! item ${run.item.id} review left an unsafe tree — ${issue}`)
-      await restoreApproved(run)
-      return { kind: 'failed' }
+      return failed(issue, await restoreApproved(run))
+    }
+    const verificationIssue =
+      input.verifyKept === undefined ? null : await input.verifyKept()
+    if (verificationIssue !== null) {
+      input.log(
+        `  ! item ${run.item.id} review kept an item the driver could not verify — ${verificationIssue}`,
+      )
+      if ((await restoreApproved(run)) === 'unknown') {
+        return failed(
+          'could not prove the approved repository after failed driver verification',
+          'unknown',
+        )
+      }
+      const decisionReason = oneLine(
+        `Driver re-ran configured verification after this item and it failed: ${verificationIssue}`,
+        SIGNAL_LIMITS.decisionReason,
+      )
+      return {
+        kind: 'ok',
+        signal: {
+          ...outcome.signal,
+          result: 'applied_reverted',
+          appliedImprovements: [
+            {
+              ...review,
+              status: 'reverted',
+              decisionReason,
+              files: [],
+            },
+          ],
+          plannedCount: 1,
+          keptCount: 0,
+          revertedCount: 1,
+          failedCount: 0,
+          skippedCount: 0,
+        },
+      }
     }
     approvedSnapshot = current
     stageSnapshot = current

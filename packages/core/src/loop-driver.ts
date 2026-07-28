@@ -42,6 +42,7 @@ import {
   statusPorcelain,
   validateCommitFileAttribution,
 } from './git.ts'
+import { writeCanonicalImproveBatch } from './improve-batch.ts'
 import { runImproveBatch } from './improve-runner.ts'
 import { createImproveStageExecutor } from './improve-stage.ts'
 import {
@@ -54,20 +55,34 @@ import {
   writeJson,
   writeText,
 } from './io.ts'
+import { SIGNAL_LIMITS } from './limits.ts'
 import { acquireDriverLock, releaseDriverLock } from './lock.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
+import {
+  createCommandRunner,
+  hasGatingFailure,
+  preflightReport,
+  runBaselinePreflight,
+  type SpawnCommand,
+  verifyGatingCommands,
+} from './preflight.ts'
 import { quotaExhaustedInLog } from './quota.ts'
 import {
   guardAnalyzeRepository,
   rollbackIterationRepository,
 } from './repository-guard.ts'
-import { captureRepositorySnapshot } from './repository-snapshot.ts'
+import {
+  captureRepositorySnapshot,
+  validateRepositoryDelta,
+} from './repository-snapshot.ts'
+import { oneLine } from './safe-text.ts'
 import { LEDGER_HEADER, scaffold, writePrompts } from './scaffold.ts'
 import {
   beginPhase,
   keptCountOf,
   keptFilesOf,
   readSignal,
+  validateAnalyzeSignal,
   validateImproveSignal,
 } from './signal.ts'
 import {
@@ -79,6 +94,7 @@ import {
 import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
 import type {
   AgentRole,
+  CommandRunner,
   DriverOptions,
   ImproveStage,
   LoopState,
@@ -90,6 +106,7 @@ import type {
 
 type ResolvedDriverOptions = DriverOptions & {
   readonly backend: AgentBackend
+  readonly commandRunner: CommandRunner
 }
 
 function composeMessage(
@@ -109,6 +126,16 @@ function composeMessage(
     `Your FINAL action MUST be overwriting ${stateDirRel}/signal.json exactly as that file specifies.`
   )
 }
+
+/**
+ * Spawn one configured verification command for the baseline preflight. It goes through a shell
+ * because that is the shape of the string the user configured (`bun test --filter core`,
+ * `cargo clippy -- -D warnings`), at the same trust level as their own package.json scripts.
+ * Output is discarded: the preflight only needs the exit status, and streaming a full test run into
+ * the driver log before the first life would bury the verdict it exists to deliver.
+ */
+const spawnVerifyCommand: SpawnCommand = (command, cwd) =>
+  spawn(command, { cwd, shell: true, stdio: 'ignore' })
 
 /** Spawn an agent CLI, tee its output to a log file, resolve with the exit code. */
 export function runAgent(
@@ -300,6 +327,10 @@ async function runPhase(
       iteration: iter,
       phase,
       timeoutMs: config.phaseTimeoutMs,
+      // The native backend gates completion on the agent's terminal signal (not session.idle,
+      // which fires while the child's own background sub-agents still run). Same read the driver
+      // uses below at line 315; CliSpawnBackend ignores it.
+      completionProbe: () => readSignal(paths, iter, phase),
       ...(invocation?.stage === undefined ? {} : { stage: invocation.stage }),
       ...(invocation?.item === undefined ? {} : { item: invocation.item }),
       ...(invocation?.itemIndex === undefined
@@ -353,7 +384,7 @@ type PhaseOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota' }
   | { readonly kind: 'aborted' }
-  | { readonly kind: 'failed' }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /** Compact human duration for wait/pause logs: 90000 -> "2m", 21600000 -> "6.0h". */
 function fmtDuration(ms: number): string {
@@ -488,8 +519,22 @@ async function runPhaseResilient(
     invocation?.logPath ?? join(paths.logsDir, `iter-${pad(iter)}-${phase}.log`)
   const waitDeadline = Date.now() + config.maxQuotaWaitMs
   let attempt = 0
+  let rejectionReason: string | null = null
   while (attempt < PHASE_ATTEMPTS) {
     attempt++
+    const attemptInvocation =
+      rejectionReason === null
+        ? invocation
+        : invocation === undefined
+          ? {
+              role: phase,
+              logPath,
+              message: `${composeMessage(iter, phase, stateDirRel, scope)}\n\nPREVIOUS ATTEMPT REJECTED. The driver refused your last signal for this exact item because: "${rejectionReason}". Fix precisely that and re-emit the signal; everything else about your task is unchanged.`,
+            }
+          : {
+              ...invocation,
+              message: `${invocation.message}\n\nPREVIOUS ATTEMPT REJECTED. The driver refused your last signal for this exact item because: "${rejectionReason}". Fix precisely that and re-emit the signal; everything else about your task is unchanged.`,
+            }
     const execution = await runPhase(
       paths,
       config,
@@ -499,15 +544,18 @@ async function runPhaseResilient(
       log,
       stateDirRel,
       scope,
-      invocation,
+      attemptInvocation,
     )
     if (execution.result.kind === 'aborted') return { kind: 'aborted' }
     if (execution.result.kind !== 'quota' && execution.signal) {
       const issue = validate?.(execution.signal) ?? null
       if (issue === null) return { kind: 'ok', signal: execution.signal }
+      rejectionReason = issue
       log(
         `  ! ${phase}: invalid structured signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — ${issue}`,
       )
+    } else {
+      rejectionReason = 'no valid signal'
     }
 
     // A no-signal run looks like a crash by exit code, but an out-of-quota wall needs the
@@ -530,7 +578,7 @@ async function runPhaseResilient(
       const retryIssue = (await retryGuard?.()) ?? null
       if (retryIssue !== null) {
         log(`  ! ${phase}: refusing unsafe retry — ${retryIssue}`)
-        return { kind: 'failed' }
+        return { kind: 'failed', reason: retryIssue }
       }
       await delay(config.quotaPollMs)
       attempt-- // a quota wait is not a crash attempt — retry this life without spending budget
@@ -541,7 +589,7 @@ async function runPhaseResilient(
       const retryIssue = (await retryGuard?.()) ?? null
       if (retryIssue !== null) {
         log(`  ! ${phase}: refusing unsafe retry — ${retryIssue}`)
-        return { kind: 'failed' }
+        return { kind: 'failed', reason: retryIssue }
       }
       log(
         `  ! ${phase}: no valid signal (attempt ${attempt}/${PHASE_ATTEMPTS}) — the agent may have crashed. Retrying in a fresh session…`,
@@ -549,7 +597,7 @@ async function runPhaseResilient(
       await delay(2000)
     }
   }
-  return { kind: 'failed' }
+  return { kind: 'failed', reason: rejectionReason ?? 'no valid signal' }
 }
 
 async function appendHistory(
@@ -796,11 +844,23 @@ export interface DriverResult {
   readonly threshold: number
 }
 
+type ReconcileKeptCommitOutcome =
+  | {
+      readonly kind: 'committed'
+      readonly keptCount: number
+      readonly plannedCount: number
+      readonly fileCount: number
+    }
+  | { readonly kind: 'nothing-to-commit' }
+  | { readonly kind: 'disabled-by-config' }
+  | { readonly kind: 'refused'; readonly reason: string }
+
 /**
  * Commit one completed batch from its structured signal. The driver owns commit creation so every
  * normal and signing-retry path uses the same applied/planned count and per-item evidence. It stages
  * ONLY files the signal names as kept (never a blanket `git add -A`), so unrelated changes are not
- * swept in. Git failure is best-effort and never fatal; the loop must not wedge while unattended.
+ * swept in. Every refusal is returned explicitly so callers can distinguish a recorded commit from
+ * work that remains in the tree; Git failure is still non-throwing and never wedges unattended use.
  */
 async function reconcileKeptCommit(
   paths: Paths,
@@ -811,21 +871,30 @@ async function reconcileKeptCommit(
   scope: string,
   log: (line: string) => void,
   git: GitRunner = runGit,
-): Promise<void> {
-  if (!config.commitPerIteration) return
-  if (keptCountOf(sig) === 0) return
+): Promise<ReconcileKeptCommitOutcome> {
+  if (!config.commitPerIteration) return { kind: 'disabled-by-config' }
+  const keptCount = keptCountOf(sig)
+  if (keptCount === 0) return { kind: 'nothing-to-commit' }
   const files = keptFilesOf(sig)
-  // No attributable files → committing safely is impossible; the end-of-loop check will surface it.
-  if (files.length === 0) return
-  if (!(await isGitRepo(paths.root, git))) return
+  if (files.length === 0) {
+    return {
+      kind: 'refused',
+      reason: 'kept outcomes did not identify attributable files',
+    }
+  }
+  if (!(await isGitRepo(paths.root, git))) {
+    return { kind: 'refused', reason: 'project root is not a Git repository' }
+  }
   if (baselineDirty === null) {
-    log('  ! commit: could not establish the pre-IMPROVE dirty-file baseline.')
-    return
+    const reason = 'could not establish the pre-IMPROVE dirty-file baseline'
+    log(`  ! commit: ${reason}.`)
+    return { kind: 'refused', reason }
   }
   const currentDirty = await statusPaths(paths.root, scope ? [scope] : [], git)
   if (currentDirty === null) {
-    log('  ! commit: could not establish exact changed-file attribution.')
-    return
+    const reason = 'could not establish exact changed-file attribution'
+    log(`  ! commit: ${reason}.`)
+    return { kind: 'refused', reason }
   }
   const attributionIssue = validateCommitFileAttribution(
     files,
@@ -835,21 +904,28 @@ async function reconcileKeptCommit(
   )
   if (attributionIssue !== null) {
     log(`  ! commit: unsafe attribution — ${attributionIssue}`)
-    return
+    return { kind: 'refused', reason: attributionIssue }
   }
-  const dirty = await statusPorcelain(paths.root, files, git)
-  if (dirty.length === 0) return
   const message = formatIterationCommitMessage(pad(iter), sig)
   const res = await commitPaths(paths.root, files, message, git)
   if (res.code === 0) {
+    const plannedCount =
+      sig.plannedCount ?? sig.appliedImprovements?.length ?? keptCount
     log(
-      `  ✓ commit: recorded ${keptCountOf(sig)}/${sig.plannedCount ?? sig.appliedImprovements?.length ?? keptCountOf(sig)} applied item(s) across ${files.length} file(s).`,
+      `  ✓ commit: recorded ${keptCount}/${plannedCount} applied item(s) across ${files.length} file(s).`,
     )
-  } else {
-    log(
-      `  ! commit: could not record kept files (git exit ${res.code}) — left in the working tree for review.`,
-    )
+    return {
+      kind: 'committed',
+      keptCount,
+      plannedCount,
+      fileCount: files.length,
+    }
   }
+  const reason = `git exit ${res.code}`
+  log(
+    `  ! commit: could not record kept files (${reason}) — left in the working tree for review.`,
+  )
+  return { kind: 'refused', reason }
 }
 
 /**
@@ -967,6 +1043,7 @@ async function runOneLoop(
       log,
       stateDirRel,
       scope,
+      validateAnalyzeSignal,
     )
     if (analyzeSnapshot !== null) {
       const analyzeGuard = await guardAnalyzeRepository(
@@ -1067,6 +1144,8 @@ async function runOneLoop(
         : { initialSnapshot: iterationSnapshot }),
       log,
       validate: (signal, run) => validateImproveSignal(signal, [run.item]),
+      verifyKept: () =>
+        verifyGatingCommands(paths.root, config, opts.commandRunner),
       executePhase: (stagePaths, validate, retryGuard, run) =>
         runPhaseResilient(
           stagePaths,
@@ -1112,6 +1191,180 @@ async function runOneLoop(
         state.status = 'error'
         log(
           `[${label}][${iter}] item ${b.itemId} ${b.stage}가 Git HEAD를 변경했습니다. 커밋은 자동 reset하지 않고 격리했습니다.`,
+        )
+        break
+      }
+      if (b.kind === 'failed') {
+        const terminalReviews: Signal[] = [...b.reviews]
+        for (const [itemIndex, item] of planned.entries()) {
+          if (itemIndex < b.itemIndex) continue
+          const failed = itemIndex === b.itemIndex
+          const skippedReason = `not attempted because item ${b.itemId} terminated the batch`
+          const impact = failed
+            ? oneLine(`Machine failure: ${b.reason}`, SIGNAL_LIMITS.impact)
+            : skippedReason
+          const decisionReason = failed
+            ? oneLine(
+                `Driver terminated item ${b.itemId}: ${b.reason}`,
+                SIGNAL_LIMITS.decisionReason,
+              )
+            : skippedReason
+          terminalReviews.push({
+            iteration: iter,
+            phase: 'improve',
+            result: 'failed',
+            report: '(driver-generated)',
+            plannedCount: 1,
+            appliedImprovements: [
+              {
+                id: item.id,
+                title: item.title,
+                status: failed ? 'failed' : 'skipped',
+                impact,
+                decisionReason,
+                files: [],
+              },
+            ],
+            keptCount: 0,
+            revertedCount: 0,
+            failedCount: failed ? 1 : 0,
+            skippedCount: failed ? 0 : 1,
+            summary: decisionReason,
+            timestamp: nowIso(),
+          })
+        }
+
+        const improveSig = await writeCanonicalImproveBatch(
+          paths,
+          iter,
+          planned,
+          terminalReviews,
+          `${stateDirRel}/reports/${pad(iter)}-improve.md`,
+        )
+        let partialIssue = validateImproveSignal(improveSig, planned)
+        if (partialIssue === null && b.reviews.length !== b.itemIndex) {
+          partialIssue = `reviewed prefix length ${b.reviews.length} does not match failing item index ${b.itemIndex}`
+        }
+        if (partialIssue === null) {
+          for (const [reviewIndex, review] of b.reviews.entries()) {
+            const plannedItem = planned[reviewIndex]
+            if (plannedItem === undefined) {
+              partialIssue = `reviewed prefix item ${reviewIndex + 1} is outside the analyze plan`
+              break
+            }
+            const reviewIssue = validateImproveSignal(review, [plannedItem])
+            if (reviewIssue !== null) {
+              partialIssue = `reviewed prefix item ${plannedItem.id} is invalid: ${reviewIssue}`
+              break
+            }
+          }
+        }
+        if (partialIssue === null && b.repository === 'unknown') {
+          partialIssue = `item ${b.itemId} repository disposition is unknown`
+        }
+        if (partialIssue === null && iterationSnapshot === null) {
+          partialIssue = 'iteration-start repository snapshot is unavailable'
+        }
+        if (partialIssue === null && baselineDirty === null) {
+          partialIssue = 'pre-IMPROVE dirty-file baseline is unavailable'
+        }
+
+        const currentSnapshot =
+          partialIssue === null
+            ? await captureRepositorySnapshot(paths.root)
+            : null
+        if (partialIssue === null && currentSnapshot === null) {
+          partialIssue = 'current repository snapshot is unavailable'
+        }
+        if (
+          partialIssue === null &&
+          currentSnapshot !== null &&
+          currentSnapshot.head !== baselineHead
+        ) {
+          partialIssue = `Git HEAD changed from iteration baseline ${baselineHead} to ${currentSnapshot.head}`
+        }
+        if (
+          partialIssue === null &&
+          currentSnapshot !== null &&
+          iterationSnapshot !== null &&
+          currentSnapshot.indexTree !== iterationSnapshot.indexTree
+        ) {
+          partialIssue =
+            'approved repository index differs from iteration start'
+        }
+
+        const keptFiles = keptFilesOf(improveSig)
+        if (
+          partialIssue === null &&
+          currentSnapshot !== null &&
+          iterationSnapshot !== null
+        ) {
+          partialIssue = validateRepositoryDelta(
+            keptFiles,
+            iterationSnapshot,
+            currentSnapshot,
+            scope,
+          )
+        }
+        const currentDirty =
+          partialIssue === null
+            ? await statusPaths(paths.root, scope ? [scope] : [])
+            : null
+        if (partialIssue === null && currentDirty === null) {
+          partialIssue = 'current changed-file attribution is unavailable'
+        }
+        if (
+          partialIssue === null &&
+          baselineDirty !== null &&
+          currentDirty !== null
+        ) {
+          partialIssue = validateCommitFileAttribution(
+            keptFiles,
+            baselineDirty,
+            currentDirty,
+            scope,
+          )
+        }
+
+        if (partialIssue !== null) {
+          state.status = 'error'
+          log(
+            `[${label}][${iter}] item ${b.itemId} ${b.stage} 실패 후 reviewed prefix 커밋 거부 — ${partialIssue}. 저장소를 자동 롤백하지 않았으며 잔여 변경을 검토해야 합니다.`,
+          )
+          break
+        }
+
+        const commitOutcome = await reconcileKeptCommit(
+          paths,
+          config,
+          iter,
+          improveSig,
+          baselineDirty,
+          scope,
+          log,
+        )
+        if (commitOutcome.kind === 'refused') {
+          state.status = 'error'
+          log(
+            `[${label}][${iter}] reviewed prefix를 커밋하지 못했습니다 — ${commitOutcome.reason}. 잔여 변경을 보존하고 중단합니다.`,
+          )
+          break
+        }
+
+        await appendHistory(paths, config, iter, 'improve', improveSig)
+        const kept = keptCountOf(improveSig)
+        recordImproveOutcome(state, kept)
+        state.iteration = iter
+        state.status = 'error'
+        await saveState(paths, state)
+        const commitSummary =
+          commitOutcome.kind === 'committed'
+            ? `reviewed prefix ${commitOutcome.keptCount}개를 ${commitOutcome.fileCount}개 파일로 커밋했습니다`
+            : commitOutcome.kind === 'disabled-by-config'
+              ? '자동 커밋이 비활성화되어 reviewed prefix를 워킹트리에 보존했습니다'
+              : '커밋할 kept 파일이 없었습니다'
+        log(
+          `[${label}][${iter}] item ${b.itemId} ${b.stage} 실패 — ${commitSummary}. item ${b.itemId}은 failed, 이후 ${planned.length - b.itemIndex - 1}개 item은 skipped로 기록하고 error 정지합니다.`,
         )
         break
       }
@@ -1167,7 +1420,7 @@ async function runOneLoop(
     }
     // Commit only after the structured signal exists, so the message can explain every decision.
     if (!opts.dryRun) {
-      await reconcileKeptCommit(
+      const commitOutcome = await reconcileKeptCommit(
         paths,
         config,
         iter,
@@ -1176,6 +1429,11 @@ async function runOneLoop(
         scope,
         log,
       )
+      if (commitOutcome.kind === 'refused') {
+        log(
+          `[${label}][${iter}] kept work remains uncommitted — ${commitOutcome.reason}.`,
+        )
+      }
     }
     state.iteration = iter
     await saveState(paths, state)
@@ -1225,6 +1483,8 @@ export async function runLoop(
   const resolvedOpts: ResolvedDriverOptions = {
     ...opts,
     backend: opts.backend ?? createCliSpawnBackend(),
+    commandRunner:
+      opts.commandRunner ?? createCommandRunner(spawnVerifyCommand),
   }
   const paths = resolvePaths(opts.cwd)
   // Materialise .retry-now/ first (the lock file lives inside it), then take the project-local lock.
@@ -1265,6 +1525,31 @@ async function runLoopBody(
       `bench=${config.benchCommand ? `on×${config.benchRuns}` : 'off'}` +
       `${config.targets.length > 0 ? `  targets=${config.targets.length}` : ''}${opts.dryRun ? '  [DRY-RUN]' : ''}`,
   )
+
+  // Measure the verification baseline ONCE, before any life starts and before targets are split.
+  // A command that is already red at HEAD reverts every item the loop will ever propose, keeps
+  // nothing, and marches straight to `revertThreshold` — where it announces convergence. That is the
+  // worst outcome this tool can produce because it is silently WRONG: the log claims the tree is
+  // perfect when the truth is that no verdict was ever trustworthy. Measured here rather than inside
+  // `runOneLoop` so a per-package run pays for it once instead of once per target, and refusing
+  // leaves `state.json` untouched — nothing started, so there is no run state to record.
+  if (!opts.dryRun) {
+    const preflight = await runBaselinePreflight(
+      opts.cwd,
+      config,
+      opts.commandRunner,
+    )
+    const report = preflightReport(preflight)
+    if (report !== null) for (const line of report) log(line)
+    if (hasGatingFailure(preflight)) {
+      return {
+        status: 'error',
+        iterations: 0,
+        finalStreak: 0,
+        threshold: config.threshold,
+      }
+    }
+  }
 
   if (config.targets.length === 0) {
     return runOneLoop(opts.cwd, null, config, opts, log)

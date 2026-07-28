@@ -14,10 +14,13 @@
  * a pending start simply waits for the next idle until config is ready, then clears.
  */
 export interface AutoStartDeps {
-  /** Launch the loop for `parentSessionID`; no-ops when config is missing or a loop already runs. */
-  readonly start: (parentSessionID: string) => Promise<void>
-  /** Whether a loop is currently active for this directory (used to confirm a start took hold). */
-  readonly isActive: () => boolean
+  /**
+   * Resolve the command session's project, launch its loop, and return whether a loop is now ACTIVE
+   * for that project — so a pending start clears only once it takes hold. Returns false when it
+   * no-ops (no config yet, or the resolved directory is wrong) so a later idle retries; returns true
+   * when the loop is running (freshly started or already active).
+   */
+  readonly start: (parentSessionID: string) => Promise<boolean>
   /** Best-effort logger for unexpected start failures. */
   readonly log?: (line: string) => void
 }
@@ -41,14 +44,15 @@ export class AutoStartCoordinator {
   private async attempt(): Promise<void> {
     const parentSessionID = this.pending
     if (parentSessionID === undefined) return
+    let active = false
     try {
-      await this.deps.start(parentSessionID)
+      active = await this.deps.start(parentSessionID)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       this.deps.log?.(`retry-now auto-start failed: ${detail}`)
     }
     // Clear only once the loop actually took hold; otherwise keep waiting for a later idle
     // (e.g. the interview has not written config yet).
-    if (this.deps.isActive()) this.pending = undefined
+    if (active) this.pending = undefined
   }
 }

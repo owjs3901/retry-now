@@ -23,7 +23,11 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import type { Plugin } from '@opencode-ai/plugin'
-import { buildPluginCommandFile } from '@retry-now/core'
+import {
+  buildPluginCommandFile,
+  buildPluginStatusCommandFile,
+  buildPluginStopCommandFile,
+} from '@retry-now/core'
 
 import { AutoStartCoordinator } from './native/auto-start.ts'
 import { LoopController } from './native/controller.ts'
@@ -41,11 +45,18 @@ let loopController: LoopController | undefined
  */
 export function ensureCommandFile(homeDirectory?: string): void {
   try {
-    const file = buildPluginCommandFile()
-    const dest = join(homeDirectory ?? homedir(), file.homePath)
-    if (existsSync(dest) && readFileSync(dest, 'utf8') === file.content) return
-    mkdirSync(dirname(dest), { recursive: true })
-    writeFileSync(dest, file.content, 'utf8')
+    const home = homeDirectory ?? homedir()
+    for (const file of [
+      buildPluginCommandFile(),
+      buildPluginStatusCommandFile(),
+      buildPluginStopCommandFile(),
+    ]) {
+      const dest = join(home, file.homePath)
+      if (existsSync(dest) && readFileSync(dest, 'utf8') === file.content)
+        continue
+      mkdirSync(dirname(dest), { recursive: true })
+      writeFileSync(dest, file.content, 'utf8')
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error(`retry-now command registration failed: ${detail}`)
@@ -65,12 +76,28 @@ export const RetryNowPlugin: Plugin = async ({ client, directory }) => {
   // everywhere. `command.executed` records the parent session; `session.idle` is when we actually
   // start, so STEP 1 has already written `.retry-now/config.json`. `start()` is idempotent.
   const autoStart = new AutoStartCoordinator({
-    start: (parentSessionID) =>
-      runtime.start({}, { directory, sessionID: parentSessionID }).then(() => {
-        // discard the human-facing string; the coordinator confirms via isActive
-      }),
-    isActive: () => controller.getLoopStatus(directory) !== undefined,
-    log: (line) => console.error(line),
+    start: async (parentSessionID) => {
+      // Resolve the project from the COMMAND'S SESSION, not this plugin instance's `directory`: in a
+      // multi-project opencode session the bus event may reach ANY instance, so `input.directory` is
+      // unreliable (it points at whichever project that instance was created for). The session's own
+      // directory is authoritative and instance-independent, so `/retry-now` always starts the loop
+      // for the project it was actually run in.
+      let dir = directory
+      try {
+        const res = await client.session.get({
+          path: { id: parentSessionID },
+        })
+        const resolved = res?.data?.directory
+        if (typeof resolved === 'string' && resolved.length > 0) dir = resolved
+      } catch {
+        // The session lookup is best-effort; fall back to this instance's directory.
+      }
+      await runtime.start({}, { directory: dir, sessionID: parentSessionID })
+      return controller.getLoopStatus(dir) !== undefined
+    },
+    log: (line) => {
+      console.error(line)
+    },
   })
   return {
     event: async ({ event }) => {

@@ -222,3 +222,25 @@ test('stop writes the sentinel, marks stopping, and aborts the active child', as
     expect(output).toContain('즉시 중단')
   })
 })
+
+test('status surfaces the live phase child sessions the driver registered', async () => {
+  await withFixture(async ({ root, runtime, controller }) => {
+    // Given: a driver has launched an ANALYZE phase child for this project
+    await seedConfig(root)
+    controller.registerChild('ses_child_a1', {
+      directory: root,
+      skipPermissions: true,
+      title: 'retry-now #0001 ANALYZE',
+    })
+
+    // When
+    const output = await runtime.status({
+      directory: root,
+      sessionID: 'parent-1',
+    })
+
+    // Then: the live sub-agent is surfaced with its title + session id (the task-panel stand-in)
+    expect(output).toContain('sessions   : 1 live')
+    expect(output).toContain('retry-now #0001 ANALYZE · ses_child_a1')
+  })
+})

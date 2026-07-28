@@ -7,6 +7,7 @@
  * a legacy single-change signal that carries neither — maps `result === 'applied'` → 1. That
  * fallback is what keeps `improvementBatchSize = 1` behaving exactly like the original protocol.
  */
+
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,7 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 
 import { readJson, writeJson } from '../io.ts'
+import { SIGNAL_LIMITS } from '../limits.ts'
 import { resolvePaths } from '../paths.ts'
 import {
   beginPhase,
@@ -21,6 +23,7 @@ import {
   keptFilesOf,
   normalizeSignal,
   readSignal,
+  validateAnalyzeSignal,
   validateImproveSignal,
 } from '../signal.ts'
 import type { Current, PlannedImprovement, Signal } from '../types.ts'
@@ -539,4 +542,432 @@ test('readSignal: pending → null, exact match → signal, wrong iteration/phas
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+const PIPELINE_PLAN: readonly PlannedImprovement[] = [
+  { id: '1', title: 'pipeline item' },
+]
+
+const PIPELINE_OUTCOME = {
+  id: '1',
+  title: 'pipeline item',
+  status: 'kept',
+  impact: 'verified impact',
+  decisionReason: 'verified decision',
+  files: ['src/item.ts'],
+} as const
+
+function normalizePipelineSignal(raw: Record<string, unknown>): Signal {
+  const signal = normalizeSignal(raw)
+  expect(signal).not.toBeNull()
+  if (signal === null) throw new Error('pipeline fixture must normalize')
+  return signal
+}
+
+function rawImprovePipelineSignal(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    iteration: 1,
+    phase: 'improve',
+    result: 'applied',
+    report: 'report.md',
+    plannedCount: 1,
+    appliedImprovements: [item],
+    keptCount: 1,
+    revertedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    summary: 'kept',
+    timestamp: '2026-07-27T00:00:00.000Z',
+  }
+}
+
+test('pipeline preserves an over-limit decisionReason and reports its measured length', () => {
+  const decisionReason = 'd'.repeat(1500)
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, decisionReason }),
+  )
+
+  expect(signal.appliedImprovements?.[0]?.decisionReason).toHaveLength(1500)
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain('1500')
+  expect(issue).toContain(String(SIGNAL_LIMITS.decisionReason))
+  expect(issue).not.toContain('must report')
+})
+
+test('pipeline preserves an over-limit impact and reports its measured length', () => {
+  const impact = 'i'.repeat(1500)
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, impact }),
+  )
+
+  expect(signal.appliedImprovements?.[0]?.impact).toHaveLength(1500)
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain('1500')
+  expect(issue).toContain(String(SIGNAL_LIMITS.impact))
+  expect(issue).not.toContain('must report')
+})
+
+test('pipeline preserves an over-limit metricDelta and reports its measured length', () => {
+  const metricDelta = 'm'.repeat(750)
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, metricDelta }),
+  )
+
+  expect(signal.appliedImprovements?.[0]?.metricDelta).toHaveLength(750)
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain('750')
+  expect(issue).toContain(String(SIGNAL_LIMITS.metricDelta))
+  expect(issue).not.toContain('must report')
+})
+
+test('pipeline keeps an over-limit applied title and reports title policy instead of cardinality', () => {
+  const title = 't'.repeat(250)
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, title }),
+  )
+
+  expect(signal.appliedImprovements).toHaveLength(1)
+  expect(signal.appliedImprovements?.[0]?.title).toHaveLength(250)
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain(`title is 250 characters`)
+  expect(issue).toContain(String(SIGNAL_LIMITS.title))
+  expect(issue).not.toBe(
+    'appliedImprovements must contain exactly one outcome per planned item',
+  )
+})
+
+test('pipeline reports unsafe impact separately from over-limit impact', () => {
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      impact: 'verified\u0000impact',
+    }),
+  )
+
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain('impact is unsafe')
+  expect(issue).toContain('control character')
+  expect(issue).not.toContain('too long')
+})
+
+test('pipeline reports unsafe applied titles without dropping their items', () => {
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      title: 'unsafe\u0000title',
+    }),
+  )
+
+  expect(signal.appliedImprovements).toHaveLength(1)
+  const issue = validateImproveSignal(signal, PIPELINE_PLAN)
+  expect(issue).toContain('title is unsafe')
+  expect(issue).toContain('control character')
+})
+
+test('pipeline keeps blank applied titles and invalid ids for precise validation', () => {
+  const blankTitle = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, title: '   ' }),
+  )
+  const invalidId = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, id: 'item-1' }),
+  )
+
+  expect(blankTitle.appliedImprovements).toHaveLength(1)
+  expect(validateImproveSignal(blankTitle, PIPELINE_PLAN)).toBe(
+    'item 1 must report title',
+  )
+  expect(invalidId.appliedImprovements).toHaveLength(1)
+  expect(validateImproveSignal(invalidId, PIPELINE_PLAN)).toContain('item-1')
+})
+
+test('pipeline reports unsafe decisionReason and metricDelta separately from length', () => {
+  const decisionSignal = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      decisionReason: 'unsafe\u202edecision',
+    }),
+  )
+  const metricSignal = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      metricDelta: 'unsafe\u0000metric',
+    }),
+  )
+
+  expect(validateImproveSignal(decisionSignal, PIPELINE_PLAN)).toContain(
+    'decisionReason is unsafe',
+  )
+  expect(validateImproveSignal(metricSignal, PIPELINE_PLAN)).toContain(
+    'metricDelta is unsafe',
+  )
+})
+
+test('pipeline treats whitespace-only required evidence as genuinely blank', () => {
+  const impactSignal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, impact: '   ' }),
+  )
+  const decisionSignal = normalizePipelineSignal(
+    rawImprovePipelineSignal({ ...PIPELINE_OUTCOME, decisionReason: '   ' }),
+  )
+
+  expect(validateImproveSignal(impactSignal, PIPELINE_PLAN)).toBe(
+    'item 1 must report impact',
+  )
+  expect(validateImproveSignal(decisionSignal, PIPELINE_PLAN)).toBe(
+    'item 1 must report decisionReason',
+  )
+})
+
+test('pipeline accepts decisionReason at the cap and rejects cap plus one', () => {
+  const atCap = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      decisionReason: 'd'.repeat(SIGNAL_LIMITS.decisionReason),
+    }),
+  )
+  const overCap = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      ...PIPELINE_OUTCOME,
+      decisionReason: 'd'.repeat(SIGNAL_LIMITS.decisionReason + 1),
+    }),
+  )
+
+  expect(validateImproveSignal(atCap, PIPELINE_PLAN)).toBeNull()
+  expect(validateImproveSignal(overCap, PIPELINE_PLAN)).toContain(
+    String(SIGNAL_LIMITS.decisionReason + 1),
+  )
+})
+
+test('pipeline still reports a genuinely absent decisionReason as missing', () => {
+  const signal = normalizePipelineSignal(
+    rawImprovePipelineSignal({
+      id: PIPELINE_OUTCOME.id,
+      title: PIPELINE_OUTCOME.title,
+      status: PIPELINE_OUTCOME.status,
+      impact: PIPELINE_OUTCOME.impact,
+      files: PIPELINE_OUTCOME.files,
+    }),
+  )
+
+  expect(validateImproveSignal(signal, PIPELINE_PLAN)).toBe(
+    'item 1 must report decisionReason',
+  )
+})
+
+function rawAnalyzePipelineSignal(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    iteration: 1,
+    phase: 'analyze',
+    result: 'improvements_found',
+    report: 'report.md',
+    plannedImprovements: [{ id: '5', title: 'pipeline plan item' }],
+    summary: 'planned',
+    timestamp: '2026-07-27T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+test('pipeline preserves an over-limit analyze title and reports its measured length', () => {
+  const title = 't'.repeat(250)
+  const signal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [{ id: '5', title }],
+    }),
+  )
+
+  expect(signal.plannedImprovements).toHaveLength(1)
+  expect(signal.plannedImprovements?.[0]?.title).toHaveLength(250)
+  expect(validateAnalyzeSignal(signal)).toBe(
+    `planned item 5 title is 250 characters; the limit is ${SIGNAL_LIMITS.title}`,
+  )
+})
+
+test('pipeline preserves over-limit analyze approach and verification text with measured errors', () => {
+  const approach = 'a'.repeat(SIGNAL_LIMITS.planText + 1)
+  const verification = 'v'.repeat(SIGNAL_LIMITS.planText + 1)
+  const approachSignal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [{ id: '5', title: 'pipeline plan item', approach }],
+    }),
+  )
+  const verificationSignal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [
+        { id: '5', title: 'pipeline plan item', verification },
+      ],
+    }),
+  )
+
+  expect(approachSignal.plannedImprovements?.[0]?.approach).toHaveLength(
+    SIGNAL_LIMITS.planText + 1,
+  )
+  expect(validateAnalyzeSignal(approachSignal)).toContain(
+    `approach is ${SIGNAL_LIMITS.planText + 1} characters`,
+  )
+  expect(
+    verificationSignal.plannedImprovements?.[0]?.verification,
+  ).toHaveLength(SIGNAL_LIMITS.planText + 1)
+  expect(validateAnalyzeSignal(verificationSignal)).toContain(
+    `verification is ${SIGNAL_LIMITS.planText + 1} characters`,
+  )
+})
+
+test('pipeline reports distinct unsafe-character reasons for analyze text fields', () => {
+  const titleSignal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [{ id: '5', title: 'unsafe\u0000title' }],
+    }),
+  )
+  const approachSignal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [
+        {
+          id: '5',
+          title: 'pipeline plan item',
+          approach: 'unsafe\u0000approach',
+        },
+      ],
+    }),
+  )
+  const verificationSignal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [
+        {
+          id: '5',
+          title: 'pipeline plan item',
+          verification: 'unsafe\u202everification',
+        },
+      ],
+    }),
+  )
+
+  expect(titleSignal.plannedImprovements).toHaveLength(1)
+  expect(validateAnalyzeSignal(titleSignal)).toContain('title is unsafe')
+  expect(validateAnalyzeSignal(approachSignal)).toContain('approach is unsafe')
+  expect(validateAnalyzeSignal(verificationSignal)).toContain(
+    'verification is unsafe',
+  )
+})
+
+test('pipeline analyze validation distinguishes missing plans, blank titles, and invalid ids', () => {
+  const missingPlan = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({ plannedImprovements: undefined }),
+  )
+  const emptyPlan = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({ plannedImprovements: [] }),
+  )
+  const blankTitle = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [{ id: '5', title: '   ' }],
+    }),
+  )
+  const invalidId = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [{ id: 'item-5', title: 'pipeline plan item' }],
+    }),
+  )
+
+  expect(validateAnalyzeSignal(missingPlan)).toContain(
+    'plannedImprovements must contain at least one item',
+  )
+  expect(validateAnalyzeSignal(emptyPlan)).toContain(
+    'plannedImprovements must contain at least one item',
+  )
+  expect(blankTitle.plannedImprovements).toHaveLength(1)
+  expect(validateAnalyzeSignal(blankTitle)).toBe(
+    'planned item 5 must report title',
+  )
+  expect(invalidId.plannedImprovements).toHaveLength(1)
+  expect(validateAnalyzeSignal(invalidId)).toContain('item-5')
+})
+
+test('pipeline analyze validation rejects duplicate plan ids', () => {
+  const signal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [
+        { id: '5', title: 'first' },
+        { id: '5', title: 'second' },
+      ],
+    }),
+  )
+
+  expect(validateAnalyzeSignal(signal)).toBe('planned item id 5 must be unique')
+})
+
+test('pipeline accepts no-improvements without a plan but validates a plan when present', () => {
+  const withoutPlan = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      result: 'no_improvements',
+      plannedImprovements: undefined,
+    }),
+  )
+  const invalidPlan = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      result: 'no_improvements',
+      plannedImprovements: [{ id: 'invalid', title: 'present item' }],
+    }),
+  )
+
+  expect(validateAnalyzeSignal(withoutPlan)).toBeNull()
+  expect(validateAnalyzeSignal(invalidPlan)).toContain('invalid')
+})
+
+test('pipeline analyze validation accepts fields at their caps and rejects non-analyze results', () => {
+  const atCap = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({
+      plannedImprovements: [
+        {
+          id: '5',
+          title: 't'.repeat(SIGNAL_LIMITS.title),
+          approach: 'a'.repeat(SIGNAL_LIMITS.planText),
+          verification: 'v'.repeat(SIGNAL_LIMITS.planText),
+        },
+      ],
+    }),
+  )
+  const wrongResult = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({ result: 'applied' }),
+  )
+
+  expect(validateAnalyzeSignal(atCap)).toBeNull()
+  expect(validateAnalyzeSignal(wrongResult)).toContain('analyze result')
+})
+
+/**
+ * The plan ceiling used to be a silent `.slice(0, 16)` in the parser — the same silent-drop sin that
+ * produced the false cardinality error. Removing the truncation was right; removing the BOUND was
+ * not, because every planned item costs a fresh implement session plus a fresh review session, so an
+ * unbounded plan is unbounded unattended spend. It is now enforced out loud, with the real count.
+ */
+test('pipeline preserves an over-ceiling plan and rejects it with the measured item count', () => {
+  const oversized = Array.from(
+    { length: SIGNAL_LIMITS.planItems + 4 },
+    (_unused, index) => ({ id: String(index + 1), title: `item ${index + 1}` }),
+  )
+  const signal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({ plannedImprovements: oversized }),
+  )
+
+  // Nothing was quietly truncated away...
+  expect(signal.plannedImprovements).toHaveLength(SIGNAL_LIMITS.planItems + 4)
+  // ...and the ceiling still holds, stated with the number the agent actually sent.
+  expect(validateAnalyzeSignal(signal)).toBe(
+    `plannedImprovements has ${SIGNAL_LIMITS.planItems + 4} items; the limit is ${SIGNAL_LIMITS.planItems}`,
+  )
+})
+
+test('a plan exactly at the ceiling is accepted', () => {
+  const atCeiling = Array.from(
+    { length: SIGNAL_LIMITS.planItems },
+    (_unused, index) => ({ id: String(index + 1), title: `item ${index + 1}` }),
+  )
+  const signal = normalizePipelineSignal(
+    rawAnalyzePipelineSignal({ plannedImprovements: atCeiling }),
+  )
+
+  expect(validateAnalyzeSignal(signal)).toBeNull()
 })

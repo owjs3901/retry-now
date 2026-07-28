@@ -273,6 +273,17 @@ export interface Current {
   target?: string
 }
 
+/**
+ * Runs one configured verification command and resolves its exit status. Injectable for the same
+ * reason `GitRunner` and `AgentBackend` are: the default implementation spawns a real shell, and a
+ * test that exercised it would re-enter the project's own `verifyTest` recursively.
+ */
+export type CommandRunner = (
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+) => Promise<number>
+
 /** Options passed to the driver (mostly sourced from config, overridable per run). */
 export interface DriverOptions {
   /** project root that the loop operates on (where `.retry-now/` lives) */
@@ -287,6 +298,8 @@ export interface DriverOptions {
   readonly waitForQuota: boolean
   /** phase execution backend; defaults to the existing CLI subprocess implementation */
   readonly backend?: AgentBackend
+  /** baseline-preflight command runner; defaults to a real shell spawn */
+  readonly commandRunner?: CommandRunner
   /** optional progress sink; defaults to console */
   readonly log?: (line: string) => void
 }

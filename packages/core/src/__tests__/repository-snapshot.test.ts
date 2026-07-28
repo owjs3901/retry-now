@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
@@ -308,14 +315,13 @@ test('index restoration keeps the primary failure when cleanup also fails', asyn
 })
 
 test('capture rejects an index that changes while files are being snapshotted', async () => {
-  let reads = 0
+  let indexReads = 0
   const snapshot = await captureRepositorySnapshot(
     ROOT,
-    fakeGit(),
-    fakeFiles({
-      readFile: () =>
-        Promise.resolve(Buffer.from(reads++ === 0 ? 'before' : 'after')),
+    fakeGit({
+      index: () => (indexReads++ === 0 ? INDEX : 'changed-index'),
     }),
+    fakeFiles(),
   )
 
   expect(snapshot).toBeNull()
@@ -495,5 +501,221 @@ test('restore rejects a mismatched verification snapshot', async () => {
         readFile: () => Promise.resolve(Buffer.from('changed-index-file')),
       }),
     ),
-  ).toBe('repository did not match the approved snapshot after restoration')
+  ).toBe(
+    `repository did not match the approved snapshot after restoration: staged tree is changed-index, expected ${INDEX}`,
+  )
+})
+
+test('restore accepts stat-cache index churn after rewriting multiple files', async () => {
+  const root = await initRepo({
+    'src/first.ts': 'first approved\n',
+    'src/second.ts': 'second approved\n',
+    'src/third.ts': 'third approved\n',
+  })
+  try {
+    const trackedPaths = ['src/first.ts', 'src/second.ts', 'src/third.ts']
+    const oldTimestamp = new Date('2000-01-01T00:00:00.000Z')
+    for (const path of trackedPaths) {
+      await utimes(join(root, path), oldTimestamp, oldTimestamp)
+    }
+    expect((await runGit(['update-index', '--refresh'], root)).code).toBe(0)
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+
+    await writeFile(join(root, 'src/first.ts'), 'first changed\n')
+    await writeFile(join(root, 'src/second.ts'), 'second changed\n')
+    await writeFile(join(root, 'src/third.ts'), 'third changed\n')
+    await writeFile(join(root, 'src/untracked.ts'), 'remove me\n')
+    let writeTreeCalls = 0
+    const refreshingGit: GitRunner = async (args, cwd) => {
+      if (args[0] === 'write-tree' && writeTreeCalls++ === 2) {
+        await runGit(['status', '--porcelain'], cwd)
+      }
+      return runGit(args, cwd)
+    }
+
+    const issue = await restoreRepositorySnapshot(root, snapshot, refreshingGit)
+    const status = await runGit(['status', '--porcelain'], root)
+    const restored = await captureRepositorySnapshot(root)
+    expect(restored).not.toBeNull()
+    if (restored === null) return
+    if (restored.indexFile.equals(snapshot.indexFile)) {
+      const alternateTimestamp = new Date('2001-01-01T00:00:00.000Z')
+      for (const path of trackedPaths) {
+        await utimes(join(root, path), alternateTimestamp, alternateTimestamp)
+      }
+      expect((await runGit(['update-index', '--refresh'], root)).code).toBe(0)
+    }
+    const observed = await captureRepositorySnapshot(root)
+    expect(observed).not.toBeNull()
+    if (observed === null) return
+
+    expect(issue).toBeNull()
+    expect(status.stdout).toBe('')
+    expect(observed.indexFile.equals(snapshot.indexFile)).toBe(false)
+    expect(observed.head).toBe(snapshot.head)
+    expect(observed.indexTree).toBe(snapshot.indexTree)
+    expect(repositoryDelta(snapshot, observed)).toEqual([])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('restore reports a staged tree changed during verification', async () => {
+  const root = await initRepo({ 'value.txt': 'approved\n' })
+  try {
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    const stagedPath = join(root, 'staged.txt')
+    await writeFile(stagedPath, 'staged before restoration\n')
+    await runGit(['add', 'staged.txt'], root)
+    const changed = await captureRepositorySnapshot(root)
+    expect(changed?.indexTree).not.toBe(snapshot.indexTree)
+
+    let headReads = 0
+    const restagingGit: GitRunner = async (args, cwd) => {
+      if (
+        args[0] === 'rev-parse' &&
+        !args.includes('--git-path') &&
+        headReads++ === 2
+      ) {
+        await writeFile(stagedPath, 'staged during verification\n')
+        await runGit(['add', 'staged.txt'], cwd)
+      }
+      return runGit(args, cwd)
+    }
+
+    const issue = await restoreRepositorySnapshot(root, snapshot, restagingGit)
+    const actualTree = (await runGit(['write-tree'], root)).stdout.trim()
+    expect(issue).toBe(
+      `repository did not match the approved snapshot after restoration: staged tree is ${actualTree}, expected ${snapshot.indexTree}`,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('restore reports a HEAD changed during verification', async () => {
+  const approved: RepositorySnapshot = {
+    head: HEAD,
+    indexTree: INDEX,
+    indexFile: INDEX_FILE,
+    entries: new Map(),
+  }
+  let headReads = 0
+  const git = fakeGit({
+    head: () => (headReads++ < 2 ? HEAD : 'changed-head'),
+  })
+
+  expect(
+    await restoreRepositorySnapshot(ROOT, approved, git, fakeFiles()),
+  ).toBe(
+    `repository did not match the approved snapshot after restoration: HEAD is changed-head, expected ${HEAD}`,
+  )
+})
+
+test('restore reports three differing files after verification', async () => {
+  const approved: RepositorySnapshot = {
+    head: HEAD,
+    indexTree: INDEX,
+    indexFile: INDEX_FILE,
+    entries: new Map(),
+  }
+  let pathReads = 0
+  const git = fakeGit({
+    paths: () => (pathReads++ < 2 ? [] : ['src/a.ts', 'src/b.ts', 'src/c.ts']),
+  })
+
+  expect(
+    await restoreRepositorySnapshot(ROOT, approved, git, fakeFiles()),
+  ).toBe(
+    'repository did not match the approved snapshot after restoration: 3 file(s) differ (src/a.ts, src/b.ts, src/c.ts)',
+  )
+})
+
+test('restore caps the differing file list after verification', async () => {
+  const approved: RepositorySnapshot = {
+    head: HEAD,
+    indexTree: INDEX,
+    indexFile: INDEX_FILE,
+    entries: new Map(),
+  }
+  const paths = [
+    'src/a.ts',
+    'src/b.ts',
+    'src/c.ts',
+    'src/d.ts',
+    'src/e.ts',
+    'src/f.ts',
+    'src/g.ts',
+  ]
+  let pathReads = 0
+  const git = fakeGit({
+    paths: () => (pathReads++ < 2 ? [] : paths),
+  })
+
+  expect(
+    await restoreRepositorySnapshot(ROOT, approved, git, fakeFiles()),
+  ).toBe(
+    'repository did not match the approved snapshot after restoration: 7 file(s) differ (src/a.ts, src/b.ts, src/c.ts, src/d.ts, src/e.ts) (+2 more)',
+  )
+})
+
+test('capture rejects a HEAD that changes while files are being snapshotted', async () => {
+  let headReads = 0
+  const snapshot = await captureRepositorySnapshot(
+    ROOT,
+    fakeGit({
+      head: () => (headReads++ === 0 ? HEAD : 'changed-head'),
+    }),
+    fakeFiles(),
+  )
+
+  expect(snapshot).toBeNull()
+})
+
+test('capture reads the raw index once, between entry capture and the closing tree check', async () => {
+  // The retained bytes must be the ones the closing `write-tree` check vouches for, and the read
+  // must not be duplicated: an extra discarded read is pure I/O that proves nothing.
+  const order: string[] = []
+  const snapshot = await captureRepositorySnapshot(
+    ROOT,
+    fakeGit({
+      index: () => {
+        order.push('write-tree')
+        return INDEX
+      },
+    }),
+    fakeFiles({
+      readFile: () => {
+        order.push('read-index')
+        return Promise.resolve(Buffer.from('approved-index-bytes'))
+      },
+    }),
+  )
+
+  expect(snapshot?.indexTree).toBe(INDEX)
+  expect(snapshot?.indexFile).toEqual(Buffer.from('approved-index-bytes'))
+  expect(order.filter((step) => step === 'read-index')).toHaveLength(1)
+  expect(order.at(-1)).toBe('write-tree')
+})
+
+test('capture tolerates raw index bytes that change while entries are snapshotted', async () => {
+  // Stat-cache churn alone must not fail capture; only a staged-tree or HEAD move may.
+  let reads = 0
+  const snapshot = await captureRepositorySnapshot(
+    ROOT,
+    fakeGit(),
+    fakeFiles({
+      readFile: () => {
+        reads += 1
+        return Promise.resolve(Buffer.from(`index-revision-${reads}`))
+      },
+    }),
+  )
+
+  expect(snapshot).not.toBeNull()
+  expect(snapshot?.indexTree).toBe(INDEX)
 })

@@ -21,7 +21,16 @@ export type ItemStageOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota' }
   | { readonly kind: 'aborted' }
-  | { readonly kind: 'failed' }
+  | {
+      readonly kind: 'failed'
+      readonly repository: 'approved'
+      readonly reason: string
+    }
+  | {
+      readonly kind: 'failed'
+      readonly repository: 'unknown'
+      readonly reason: string
+    }
   | {
       readonly kind: 'head-changed'
       readonly expectedHead: string
@@ -52,7 +61,24 @@ export type ImproveBatchOutcome =
   | { readonly kind: 'ok'; readonly signal: Signal }
   | { readonly kind: 'quota'; readonly stage: ImproveStage }
   | { readonly kind: 'aborted'; readonly stage: ImproveStage }
-  | { readonly kind: 'failed'; readonly stage: ImproveStage }
+  | {
+      readonly kind: 'failed'
+      readonly stage: ImproveStage
+      readonly itemId: string
+      readonly itemIndex: number
+      readonly reviews: readonly Signal[]
+      readonly reason: string
+      readonly repository: 'approved'
+    }
+  | {
+      readonly kind: 'failed'
+      readonly stage: ImproveStage
+      readonly itemId: string
+      readonly itemIndex: number
+      readonly reviews: readonly Signal[]
+      readonly reason: string
+      readonly repository: 'unknown'
+    }
   | {
       readonly kind: 'head-changed'
       readonly stage: ImproveStage
@@ -109,6 +135,15 @@ export async function runImproveBatch(
         itemId: item.id,
       }
     }
+    if (implementation.kind === 'failed') {
+      return {
+        ...implementation,
+        stage: 'implement',
+        itemId: item.id,
+        itemIndex,
+        reviews: [...reviews],
+      }
+    }
     if (implementation.kind !== 'ok') {
       return { kind: implementation.kind, stage: 'implement' }
     }
@@ -152,6 +187,15 @@ export async function runImproveBatch(
     })
     if (review.kind === 'head-changed') {
       return { ...review, stage: 'review', itemId: item.id }
+    }
+    if (review.kind === 'failed') {
+      return {
+        ...review,
+        stage: 'review',
+        itemId: item.id,
+        itemIndex,
+        reviews: [...reviews],
+      }
     }
     if (review.kind !== 'ok') return { kind: review.kind, stage: 'review' }
     reviews.push({ ...review.signal, report: reviewArtifacts.report })

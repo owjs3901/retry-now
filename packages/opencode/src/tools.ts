@@ -148,6 +148,18 @@ export class RetryNowToolRuntime {
     if (await exists(paths.stop))
       lines.push('STOP       : sentinel 존재 (다음 경계에서 정지)')
 
+    const active = this.dependencies.controller.activeChildren(
+      context.directory,
+    )
+    if (active.length > 0) {
+      lines.push(
+        `sessions   : ${active.length} live (Ctrl+X로 진입해 실시간 확인)`,
+      )
+      for (const child of active) {
+        lines.push(`  ↳ ${child.title} · ${child.sessionID}`)
+      }
+    }
+
     let interrupted = false
     if (config.targets.length === 0) {
       lines.push('mode       : 전체 레포 단일 윤회')
@@ -197,29 +209,42 @@ export class RetryNowToolRuntime {
     directory: string,
     options: DriverOptions,
   ): Promise<void> {
-    try {
-      const result = await (this.dependencies.runLoop ?? runLoop)(
-        config,
-        options,
+    // Route the driver's progress log to `.retry-now/logs/plugin.log` — and ONLY there. In native
+    // (in-process) mode the driver's default sink is the opencode process stdout, which the TUI
+    // renders INLINE into the chat, so echoing every driver line garbles the conversation layout.
+    // Persisting to the file keeps the TUI clean AND makes every unattended run diagnosable (a guard
+    // restore, a phase failure, a quota pause) straight from the runtime dir. Live progress is on
+    // demand via `retrynow_status`; each phase renders in its own child session (open it with Ctrl+X).
+    const paths = resolvePaths(directory)
+    const pluginLog = join(paths.logsDir, 'plugin.log')
+    // Create the log dir WITHOUT blocking the driver launch: an `await` here would push the runLoop
+    // call past runDetached's synchronous section, so a fast rejection would leak (nothing awaits it
+    // yet) and callers that inspect the loop right after start() would see it un-launched. Appends
+    // just chain after the mkdir instead.
+    let flush: Promise<void> = mkdir(paths.logsDir, { recursive: true })
+      .then(() => undefined)
+      .catch(() => undefined)
+    const log = (line: string): void => {
+      flush = flush.then(() =>
+        appendFile(pluginLog, `${line}\n`, 'utf8').catch(() => undefined),
       )
+    }
+    log(`=== driver start ${new Date().toISOString()} (dir=${directory}) ===`)
+    try {
+      const result = await (this.dependencies.runLoop ?? runLoop)(config, {
+        ...options,
+        log,
+      })
       this.completions.set(directory, { kind: 'result', status: result.status })
+      log(
+        `=== driver end status=${result.status} iterations=${result.iterations} ===`,
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.completions.set(directory, { kind: 'error', message })
-      const paths = resolvePaths(directory)
-      try {
-        await mkdir(paths.logsDir, { recursive: true })
-        await appendFile(
-          join(paths.logsDir, 'plugin.log'),
-          `[${new Date().toISOString()}] detached loop error: ${message}\n`,
-          'utf8',
-        )
-      } catch (logError) {
-        const detail =
-          logError instanceof Error ? logError.message : String(logError)
-        console.error(`retry-now detached loop log failure: ${detail}`)
-      }
+      log(`detached loop error: ${message}`)
     } finally {
+      await flush.catch(() => undefined)
       this.dependencies.controller.unregisterLoop(directory)
     }
   }
