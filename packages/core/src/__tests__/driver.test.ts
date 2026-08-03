@@ -600,3 +600,114 @@ test('a green verification baseline lets the loop proceed normally', async () =>
     await rm(root, { recursive: true, force: true })
   }
 }, 15_000)
+
+test('a mid-run maxIterations edit takes effect at the next life boundary', async () => {
+  // The reported P1: `maxIterations` was edited 50 -> 100 during a 22-hour run and the edit was
+  // ignored with no warning, forcing a full stop/restart that threw away the life in flight. Here
+  // the cap starts at 1, the agent rewrites config.json during life 1, and the loop must honour the
+  // new cap on the very next boundary instead of stopping.
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-reload-'))
+  const paths = resolvePaths(root)
+  // threshold is raised out of the way so `maxIterations` is the ONLY stop condition in play,
+  // otherwise convergence fires on the same boundary and the assertion proves nothing.
+  const base = {
+    ...config(),
+    maxIterations: 1,
+    threshold: 10,
+    improvementBatchSize: 1,
+  }
+  let edited = false
+  const backend = new FakeBackend(async (request) => {
+    if (!edited) {
+      edited = true
+      await writeJson(paths.config, { ...base, maxIterations: 3 })
+    }
+    await writeJson(paths.signal, {
+      iteration: request.iteration,
+      phase: 'analyze',
+      result: 'no_improvements',
+      report: 'r.md',
+      plannedImprovements: [],
+      summary: 'nothing',
+      timestamp: '2026-07-30T00:00:00.000Z',
+    })
+    return { kind: 'exit', code: 0 }
+  })
+  const lines: string[] = []
+  try {
+    await initializeRepository(root)
+    await mkdir(paths.dir, { recursive: true })
+    await writeJson(paths.config, base)
+
+    const result = await runLoop(base, {
+      cwd: root,
+      dryRun: false,
+      waitForQuota: false,
+      backend,
+      commandRunner: GREEN_BASELINE,
+      log: (line) => lines.push(line),
+    })
+
+    // Without the reload this stops after ONE life; with it the raised cap is honoured.
+    expect(result.iterations).toBe(3)
+    expect(result.status).toBe('stopped-maxiter')
+    expect(lines.join('\n')).toContain('config reloaded: maxIterations 1 -> 3')
+    // Announced exactly once, not re-announced at every later boundary.
+    expect(
+      lines.filter((line) => line.includes('config reloaded: maxIterations')),
+    ).toHaveLength(1)
+    expect(
+      (await readJson<{ iteration: number }>(paths.state))?.iteration,
+    ).toBe(3)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test('a stale driver.lock transitions a lying `running` state to `interrupted`', async () => {
+  // Observed twice in production: state.json said `running` while the pid was dead and driver.lock
+  // was stale, so nothing downstream could tell that reviewed-but-uncommitted work was at risk.
+  const root = await mkdtemp(join(tmpdir(), 'retry-now-interrupted-'))
+  const paths = resolvePaths(root)
+  const lines: string[] = []
+  const backend = new FakeBackend(() => Promise.resolve({ kind: 'quota' }))
+  try {
+    await initializeRepository(root)
+    await mkdir(paths.dir, { recursive: true })
+    await writeJson(paths.config, config())
+    await writeJson(paths.state, {
+      status: 'running',
+      iteration: 43,
+      noImprovementStreak: 0,
+      threshold: 3,
+      revertStreak: 0,
+      revertThreshold: 3,
+      startedAt: '2026-07-29T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+    })
+    await writeJson(paths.driverLock, {
+      pid: 999_999,
+      root,
+      startedAt: '2026-07-30T01:00:00.000Z',
+    })
+    // Reviewed-but-uncommitted residue from the killed run.
+    await writeFile(join(root, 'fixture.txt'), 'reviewed but uncommitted\n')
+
+    await runLoop(config(), {
+      cwd: root,
+      dryRun: false,
+      waitForQuota: false,
+      backend,
+      commandRunner: GREEN_BASELINE,
+      log: (line) => lines.push(line),
+    })
+
+    const report = lines.join('\n')
+    expect(report).toContain('stale driver.lock')
+    expect(report).toContain('status running → interrupted')
+    expect(report).toContain('미커밋 잔재 1건')
+    expect(report).toContain('retry-now recover')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)

@@ -37,6 +37,16 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Inspect the current lock holder WITHOUT acquiring or reclaiming anything. `retry-now recover` needs
+ * this: it must refuse while a live driver still owns the loop state it would otherwise rewrite.
+ */
+export async function readDriverLock(
+  lockPath: string,
+): Promise<DriverLock | null> {
+  return readLock(lockPath)
+}
+
 async function readLock(lockPath: string): Promise<DriverLock | null> {
   let raw: unknown
   try {
@@ -57,14 +67,35 @@ async function readLock(lockPath: string): Promise<DriverLock | null> {
   return null
 }
 
+/**
+ * Evidence that the lock we just took was LEFT BEHIND rather than free.
+ *
+ * A driver that reaches any terminal status releases its lock, so a lock file that still exists at
+ * startup means the previous driver died without finishing — a host/editor restart, a hard kill, or
+ * an OS crash. That is the ONLY reliable in-band signal of an unclean shutdown, so it is reported
+ * instead of silently overwritten: `state.json` still says `running`, and only this tells the next
+ * driver that claim is stale.
+ */
+export interface StaleLock {
+  /** pid recorded in the reclaimed lock; null when the lock file was unreadable or malformed */
+  readonly pid: number | null
+  /** ISO start time recorded in the reclaimed lock; null when unreadable or malformed */
+  readonly startedAt: string | null
+  /** true when the lock was our OWN leftover (same pid, e.g. an in-process driver re-run) */
+  readonly own: boolean
+}
+
 export type LockResult =
-  { readonly ok: true } | { readonly ok: false; readonly holder: DriverLock }
+  | { readonly ok: true; readonly reclaimed?: StaleLock }
+  | { readonly ok: false; readonly holder: DriverLock }
 
 /**
  * Acquire the project-local driver lock. Returns `{ ok: true }` when acquired, or
  * `{ ok: false, holder }` when a LIVE driver already holds it — i.e. a second run on the SAME
  * project, which is exactly the case that would contend. A stale lock (dead holder, unreadable, or
- * our own leftover) is reclaimed. `alive` is injectable so the acquire logic is unit-testable.
+ * our own leftover) is reclaimed, and the reclaim is REPORTED via `reclaimed` so the caller can
+ * transition a lying `status: running` to `interrupted` instead of resuming as if nothing happened.
+ * `alive` is injectable so the acquire logic is unit-testable.
  */
 export async function acquireDriverLock(
   lockPath: string,
@@ -85,7 +116,14 @@ export async function acquireDriverLock(
     return { ok: false, holder }
   }
   await writeFile(lockPath, payload) // reclaim a stale / own lock
-  return { ok: true }
+  return {
+    ok: true,
+    reclaimed: {
+      pid: holder?.pid ?? null,
+      startedAt: holder?.startedAt ?? null,
+      own: holder !== null && holder.pid === process.pid,
+    },
+  }
 }
 
 /**

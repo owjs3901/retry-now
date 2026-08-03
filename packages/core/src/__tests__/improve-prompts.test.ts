@@ -28,6 +28,7 @@ const ARTIFACTS: ImproveItemPaths = {
   report: '.retry-now/reports/0042-01-implement-7.md',
   log: '.retry-now/logs/0042-01-implement-7.log',
   backupDir: '.retry-now/backups/0042/item-01-7',
+  newFiles: '.retry-now/backups/0042/item-01-7/NEW_FILES.txt',
 }
 
 const CONFIG: RetryNowConfig = {

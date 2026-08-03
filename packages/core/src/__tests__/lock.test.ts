@@ -12,7 +12,12 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
-import { acquireDriverLock, isPidAlive, releaseDriverLock } from '../lock.ts'
+import {
+  acquireDriverLock,
+  isPidAlive,
+  readDriverLock,
+  releaseDriverLock,
+} from '../lock.ts'
 
 interface RawLock {
   pid: number
@@ -125,4 +130,60 @@ test('releaseDriverLock: does NOT delete a lock a different (reclaiming) driver 
   )
   await releaseDriverLock(lockPath)
   expect((await readRaw()).pid).toBe(999_999) // untouched
+})
+
+/**
+ * A lock file that still exists at startup is the ONLY in-band proof that the previous driver was
+ * killed rather than stopped, so the reclaim has to be reported instead of silently overwritten.
+ */
+test('acquireDriverLock: a FREE lock reports no reclaim', async () => {
+  const res = await acquireDriverLock(lockPath, dir)
+  expect(res.ok).toBe(true)
+  if (res.ok) expect(res.reclaimed).toBeUndefined()
+})
+
+test('acquireDriverLock: reclaiming a dead holder reports its pid and start time', async () => {
+  await writeFile(
+    lockPath,
+    JSON.stringify({ pid: 999_999, root: dir, startedAt: 'yesterday' }),
+  )
+  const res = await acquireDriverLock(lockPath, dir, DEAD)
+  expect(res.ok).toBe(true)
+  if (!res.ok) return
+  expect(res.reclaimed?.pid).toBe(999_999)
+  expect(res.reclaimed?.startedAt).toBe('yesterday')
+  expect(res.reclaimed?.own).toBe(false)
+})
+
+test('acquireDriverLock: reclaiming an unreadable lock still reports the reclaim', async () => {
+  await writeFile(lockPath, '{ not valid json')
+  const res = await acquireDriverLock(lockPath, dir, ALIVE)
+  expect(res.ok).toBe(true)
+  if (!res.ok) return
+  expect(res.reclaimed).toBeDefined()
+  expect(res.reclaimed?.pid).toBeNull()
+  expect(res.reclaimed?.own).toBe(false)
+})
+
+test('acquireDriverLock: our OWN leftover lock is flagged as own', async () => {
+  await writeFile(
+    lockPath,
+    JSON.stringify({ pid: process.pid, root: dir, startedAt: 't' }),
+  )
+  const res = await acquireDriverLock(lockPath, dir, ALIVE)
+  expect(res.ok).toBe(true)
+  if (!res.ok) return
+  expect(res.reclaimed?.own).toBe(true)
+  expect(res.reclaimed?.pid).toBe(process.pid)
+})
+
+test('readDriverLock: inspects the holder without acquiring or reclaiming it', async () => {
+  await writeFile(
+    lockPath,
+    JSON.stringify({ pid: 999_999, root: dir, startedAt: 't' }),
+  )
+  expect((await readDriverLock(lockPath))?.pid).toBe(999_999)
+  expect((await readRaw()).pid).toBe(999_999) // untouched
+  await rm(lockPath, { force: true })
+  expect(await readDriverLock(lockPath)).toBeNull()
 })

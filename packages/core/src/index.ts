@@ -39,6 +39,7 @@ export {
   buildFrontend,
   buildFrontendBody,
   buildPluginCommandFile,
+  buildPluginRecoverCommandFile,
   buildPluginStatusCommandFile,
   buildPluginStopCommandFile,
   type FrontendFile,
@@ -63,7 +64,9 @@ export {
   type DriverLock,
   isPidAlive,
   type LockResult,
+  readDriverLock,
   releaseDriverLock,
+  type StaleLock,
 } from './lock.ts'
 export {
   CliSpawnBackend,
@@ -73,10 +76,18 @@ export {
   runLoop,
   runProjectLoop,
   type RunProjectOptions,
+  spawnVerifyCommand,
 } from './loop-driver.ts'
 export { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 export { type ImproveItemPaths, resolveImproveItemPaths } from './paths.ts'
+export { type CommandRunner, createCommandRunner } from './preflight.ts'
 export { buildAnalyzePrompt, buildImprovePrompt } from './prompts.ts'
+export {
+  type RecoverDeps,
+  recoverProject,
+  type RecoverReport,
+  type RecoverStatus,
+} from './recover.ts'
 export { scaffold } from './scaffold.ts'
 export { loadState, saveState } from './state.ts'
 export { BANNER, converged, OATH, oathBlock, rebirth } from './theme.ts'

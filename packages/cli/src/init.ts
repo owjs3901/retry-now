@@ -19,9 +19,12 @@ import {
   variantForRole,
   VERSION,
 } from '@retry-now/core'
-import { detectCapabilities } from '@retry-now/detect'
+import { detectCapabilities, type DetectionResult } from '@retry-now/detect'
 
-import { askRoleAgentSettings } from './agent-settings.ts'
+import {
+  askRoleAgentSettings,
+  type RoleAgentSettings,
+} from './agent-settings.ts'
 
 // Agent-bound defaults are English on purpose: they get injected into the analyze/improve
 // prompts sent every iteration, where English is more token-efficient than Korean.
@@ -32,16 +35,84 @@ const DEFAULT_DIRECTION =
 const DEFAULT_COMPLETION =
   'Done when static analysis/lint is clean, all benchmarks sit within noise, and there is no remaining change genuinely worth making.'
 
-function cancelled(value: unknown): value is symbol {
-  return p.isCancel(value)
+type TextOptions = {
+  readonly message: string
+  readonly placeholder: string
+  readonly initialValue?: string
+  readonly defaultValue?: string
+  readonly validate?: (value: string | undefined) => string | undefined
 }
 
-export async function runInit(cwd: string): Promise<number> {
-  p.intro(`retry-now v${VERSION} · 지금 바로 윤회`)
-  p.note(oathBlock(), '맹세')
+export type InitPrompts = {
+  readonly intro: (message: string) => void
+  readonly note: (message: string, title: string) => void
+  readonly text: (options: TextOptions) => Promise<string | symbol>
+  readonly confirm: (options: {
+    readonly message: string
+    readonly initialValue: boolean
+  }) => Promise<boolean | symbol>
+  readonly select: (options: {
+    readonly message: string
+    readonly options: {
+      readonly value: string
+      readonly label: string
+      readonly hint: string
+    }[]
+    readonly initialValue: string
+  }) => Promise<string | symbol>
+  readonly multiselect: (options: {
+    readonly message: string
+    readonly options: {
+      readonly value: string
+      readonly label: string
+      readonly hint: string
+    }[]
+    readonly initialValues: string[]
+    readonly required: boolean
+  }) => Promise<string[] | symbol>
+  readonly isCancel: (value: unknown) => value is symbol
+  readonly cancel: (message: string) => void
+  readonly outro: (message: string) => void
+}
 
-  const detected = await detectCapabilities(cwd)
-  p.note(
+export type InitDependencies = {
+  readonly prompts: InitPrompts
+  readonly detectCapabilities: (cwd: string) => Promise<DetectionResult>
+  readonly askRoleAgentSettings: () => Promise<RoleAgentSettings | null>
+}
+
+const CLACK_PROMPTS: InitPrompts = {
+  intro: p.intro,
+  note: p.note,
+  text: p.text,
+  confirm: p.confirm,
+  select: p.select,
+  multiselect: p.multiselect,
+  isCancel: p.isCancel,
+  cancel: p.cancel,
+  outro: p.outro,
+}
+
+const INIT_DEPENDENCIES: InitDependencies = {
+  prompts: CLACK_PROMPTS,
+  detectCapabilities,
+  askRoleAgentSettings,
+}
+
+function cancelled(value: unknown, prompts: InitPrompts): value is symbol {
+  return prompts.isCancel(value)
+}
+
+export async function runInit(
+  cwd: string,
+  dependencies: InitDependencies = INIT_DEPENDENCIES,
+): Promise<number> {
+  const { prompts } = dependencies
+  prompts.intro(`retry-now v${VERSION} · 지금 바로 윤회`)
+  prompts.note(oathBlock(), '맹세')
+
+  const detected = await dependencies.detectCapabilities(cwd)
+  prompts.note(
     [
       `ecosystem: ${detected.ecosystems.length ? detected.ecosystems.join(', ') : '감지 안 됨'}`,
       `test : ${detected.test || '(없음)'}`,
@@ -51,31 +122,31 @@ export async function runInit(cwd: string): Promise<number> {
     '감지된 환경 (@retry-now/detect)',
   )
 
-  const roleAgents = await askRoleAgentSettings()
-  if (!roleAgents) return cancel()
+  const roleAgents = await dependencies.askRoleAgentSettings()
+  if (!roleAgents) return cancel(prompts)
 
-  const analysis = (await p.text({
+  const analysis = await prompts.text({
     message: '1. 분석 및 계획 — 무엇을 분석/계획할지',
     placeholder: DEFAULT_ANALYSIS,
     initialValue: DEFAULT_ANALYSIS,
-  })) as string | symbol
-  if (cancelled(analysis)) return cancel()
+  })
+  if (cancelled(analysis, prompts)) return cancel(prompts)
 
-  const direction = (await p.text({
+  const direction = await prompts.text({
     message: '2. 개선 방향 — 어떻게 개선할지 (우선순위·제약)',
     placeholder: DEFAULT_DIRECTION,
     initialValue: DEFAULT_DIRECTION,
-  })) as string | symbol
-  if (cancelled(direction)) return cancel()
+  })
+  if (cancelled(direction, prompts)) return cancel(prompts)
 
-  const completion = (await p.text({
+  const completion = await prompts.text({
     message: "3. 완료 체크 — 언제 '더 개선할 게 없다'고 볼지",
     placeholder: DEFAULT_COMPLETION,
     initialValue: DEFAULT_COMPLETION,
-  })) as string | symbol
-  if (cancelled(completion)) return cancel()
+  })
+  if (cancelled(completion, prompts)) return cancel(prompts)
 
-  const thresholdRaw = (await p.text({
+  const thresholdRaw = await prompts.text({
     message: "수렴 임계값 — 몇 생 연속 '개선 없음'이면 맺어졌다(완벽)고 볼지",
     placeholder: String(DEFAULT_THRESHOLD),
     initialValue: String(DEFAULT_THRESHOLD),
@@ -84,10 +155,10 @@ export async function runInit(cwd: string): Promise<number> {
       if (!Number.isInteger(n) || n < 1) return '1 이상의 정수를 입력하세요.'
       return undefined
     },
-  })) as string | symbol
-  if (cancelled(thresholdRaw)) return cancel()
+  })
+  if (cancelled(thresholdRaw, prompts)) return cancel(prompts)
 
-  const revertThresholdRaw = (await p.text({
+  const revertThresholdRaw = await prompts.text({
     message:
       "리버트 수렴 임계값 — 몇 생 연속 '윤회 전체 리버트(회귀로 되돌림)'면 더 손댈 게 없다고 볼지",
     placeholder: String(DEFAULT_REVERT_THRESHOLD),
@@ -97,22 +168,22 @@ export async function runInit(cwd: string): Promise<number> {
       if (!Number.isInteger(n) || n < 1) return '1 이상의 정수를 입력하세요.'
       return undefined
     },
-  })) as string | symbol
-  if (cancelled(revertThresholdRaw)) return cancel()
+  })
+  if (cancelled(revertThresholdRaw, prompts)) return cancel(prompts)
 
-  const skipPermissions = (await p.confirm({
+  const skipPermissions = await prompts.confirm({
     message:
       '무인 실행을 위해 권한 확인을 건너뛸까? (--dangerously-skip-permissions 류)',
     initialValue: true,
-  })) as boolean | symbol
-  if (cancelled(skipPermissions)) return cancel()
+  })
+  if (cancelled(skipPermissions, prompts)) return cancel(prompts)
 
-  const commitPerIteration = (await p.confirm({
+  const commitPerIteration = await prompts.confirm({
     message:
       '각 윤회의 보존 변경을 상세 git commit으로 남길까? (적용/계획 수, 효과, 검증·제외 사유 포함)',
     initialValue: true,
-  })) as boolean | symbol
-  if (cancelled(commitPerIteration)) return cancel()
+  })
+  if (cancelled(commitPerIteration, prompts)) return cancel(prompts)
 
   // Step-3 verification (완료 체크): use detected test/lint to confirm each 윤회 ran cleanly,
   // or — if none detected — ask whether proceeding without it is OK (offer a custom command).
@@ -120,35 +191,35 @@ export async function runInit(cwd: string): Promise<number> {
   let verifyTest = ''
   let verifyLint = ''
   if (detected.test !== '' || detected.lint !== '') {
-    const useVerify = (await p.confirm({
+    const useVerify = await prompts.confirm({
       message: `step3(완료 체크)에서 감지된 명령으로 매 윤회를 검증할까? (test: ${detected.test || '-'}, lint: ${detected.lint || '-'})`,
       initialValue: true,
-    })) as boolean | symbol
-    if (cancelled(useVerify)) return cancel()
+    })
+    if (cancelled(useVerify, prompts)) return cancel(prompts)
     verifyEnabled = useVerify
     if (useVerify) {
       verifyTest = detected.test
       verifyLint = detected.lint
     }
   } else {
-    const okNone = (await p.confirm({
+    const okNone = await prompts.confirm({
       message: 'test/lint가 감지되지 않았다. 자동 검증 없이 진행해도 괜찮아?',
       initialValue: true,
-    })) as boolean | symbol
-    if (cancelled(okNone)) return cancel()
+    })
+    if (cancelled(okNone, prompts)) return cancel(prompts)
     if (!okNone) {
-      const customTest = (await p.text({
+      const customTest = await prompts.text({
         message: '검증에 쓸 test 명령 (없으면 비워둠)',
         placeholder: 'e.g. npm test',
         defaultValue: '',
-      })) as string | symbol
-      if (cancelled(customTest)) return cancel()
-      const customLint = (await p.text({
+      })
+      if (cancelled(customTest, prompts)) return cancel(prompts)
+      const customLint = await prompts.text({
         message: '검증에 쓸 lint 명령 (없으면 비워둠)',
         placeholder: 'e.g. npm run lint',
         defaultValue: '',
-      })) as string | symbol
-      if (cancelled(customLint)) return cancel()
+      })
+      if (cancelled(customLint, prompts)) return cancel(prompts)
       verifyTest = customTest
       verifyLint = customLint
       verifyEnabled = customTest !== '' || customLint !== ''
@@ -159,34 +230,34 @@ export async function runInit(cwd: string): Promise<number> {
   // median of N runs). Use the detected command, or ask for one when none was found.
   let benchCommand = detected.bench
   if (benchCommand === '') {
-    const customBench = (await p.text({
+    const customBench = await prompts.text({
       message:
         '벤치마크 명령 (강력 권장 — 윤회마다 before/after로 회귀 방지). 없으면 비워둠',
       placeholder: 'e.g. cargo bench / npm run bench / ./bench.sh',
       defaultValue: '',
-    })) as string | symbol
-    if (cancelled(customBench)) return cancel()
+    })
+    if (cancelled(customBench, prompts)) return cancel(prompts)
     benchCommand = customBench
   } else {
-    const keepBench = (await p.confirm({
+    const keepBench = await prompts.confirm({
       message: `감지된 벤치마크 명령을 쓸까? (${benchCommand})`,
       initialValue: true,
-    })) as boolean | symbol
-    if (cancelled(keepBench)) return cancel()
+    })
+    if (cancelled(keepBench, prompts)) return cancel(prompts)
     if (!keepBench) {
-      const customBench = (await p.text({
+      const customBench = await prompts.text({
         message: '대신 쓸 벤치마크 명령 (없으면 비워둠)',
         placeholder: 'e.g. cargo bench',
         defaultValue: '',
-      })) as string | symbol
-      if (cancelled(customBench)) return cancel()
+      })
+      if (cancelled(customBench, prompts)) return cancel(prompts)
       benchCommand = customBench
     }
   }
 
   let benchRuns = DEFAULT_BENCH_RUNS
   if (benchCommand !== '') {
-    const benchRunsRaw = (await p.text({
+    const benchRunsRaw = await prompts.text({
       message:
         '벤치 공정성 — 시스템 편차를 줄이려 before/after 각각 몇 번 반복 측정할지 (중앙값 비교)',
       placeholder: String(DEFAULT_BENCH_RUNS),
@@ -196,8 +267,8 @@ export async function runInit(cwd: string): Promise<number> {
         if (!Number.isInteger(n) || n < 1) return '1 이상의 정수를 입력하세요.'
         return undefined
       },
-    })) as string | symbol
-    if (cancelled(benchRunsRaw)) return cancel()
+    })
+    if (cancelled(benchRunsRaw, prompts)) return cancel(prompts)
     benchRuns = Number(benchRunsRaw)
   }
 
@@ -205,7 +276,7 @@ export async function runInit(cwd: string): Promise<number> {
   // (all checked by default → keep only the ones you want).
   let targets: string[] = []
   if (detected.isMonorepo && detected.members.length > 0) {
-    const mode = (await p.select({
+    const mode = await prompts.select({
       message: `모노레포 감지됨 (${detected.members.length}개 패키지). 어떻게 윤회할까?`,
       options: [
         {
@@ -220,10 +291,10 @@ export async function runInit(cwd: string): Promise<number> {
         },
       ],
       initialValue: 'whole',
-    })) as string | symbol
-    if (cancelled(mode)) return cancel()
+    })
+    if (cancelled(mode, prompts)) return cancel(prompts)
     if (mode === 'each') {
-      const picked = (await p.multiselect({
+      const picked = await prompts.multiselect({
         message: '윤회할 패키지 선택 (전부 체크됨 — 원하는 것만 남기세요)',
         options: detected.members.map((m) => ({
           value: m.path,
@@ -232,8 +303,8 @@ export async function runInit(cwd: string): Promise<number> {
         })),
         initialValues: detected.members.map((m) => m.path),
         required: false,
-      })) as string[] | symbol
-      if (cancelled(picked)) return cancel()
+      })
+      if (cancelled(picked, prompts)) return cancel(prompts)
       targets = picked
     }
   }
@@ -259,13 +330,15 @@ export async function runInit(cwd: string): Promise<number> {
       targets,
     })
   } catch (err) {
-    p.cancel(`설정 오류: ${err instanceof Error ? err.message : String(err)}`)
+    prompts.cancel(
+      `설정 오류: ${err instanceof Error ? err.message : String(err)}`,
+    )
     return 1
   }
 
   await scaffold(cwd, config, true)
 
-  p.note(
+  prompts.note(
     [
       `.retry-now/ 생성됨 (전체 git 제외: .gitignore = '*').`,
       config.targets.length > 0
@@ -286,11 +359,11 @@ export async function runInit(cwd: string): Promise<number> {
     ].join('\n'),
     '준비 완료',
   )
-  p.outro('운명이여, 무릎 꿇어라.')
+  prompts.outro('운명이여, 무릎 꿇어라.')
   return 0
 }
 
-function cancel(): number {
-  p.cancel('취소되었다. 다음 생에서 다시 만나자.')
+function cancel(prompts: InitPrompts): number {
+  prompts.cancel('취소되었다. 다음 생에서 다시 만나자.')
   return 130
 }

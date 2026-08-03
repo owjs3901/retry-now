@@ -10,15 +10,20 @@ import { join } from 'node:path'
 import { tool, type ToolDefinition } from '@opencode-ai/plugin'
 import {
   createCliSpawnBackend,
+  createCommandRunner,
   type DriverOptions,
   type DriverResult,
   loadConfig,
   loadState,
   type Paths,
+  type RecoverDeps,
+  recoverProject,
+  type RecoverReport,
   resolvePaths,
   type RetryNowConfig,
   runLoop,
   slugifyTarget,
+  spawnVerifyCommand,
 } from '@retry-now/core'
 
 import { createOpencodeNativeBackend } from './native/backend.ts'
@@ -39,10 +44,19 @@ type RunLoop = (
   options: DriverOptions,
 ) => Promise<DriverResult>
 
+type RecoverProject = (
+  root: string,
+  deps: RecoverDeps,
+) => Promise<{
+  readonly reports: readonly RecoverReport[]
+  readonly code: number
+}>
+
 export interface RetryNowToolDependencies {
   readonly client: NativeSessionClient
   readonly controller: LoopController
   readonly runLoop?: RunLoop
+  readonly recoverProject?: RecoverProject
 }
 
 type LoopCompletion =
@@ -61,14 +75,24 @@ async function exists(path: string): Promise<boolean> {
 async function describeState(
   paths: Paths,
   config: RetryNowConfig,
-): Promise<{ readonly text: string; readonly running: boolean }> {
+): Promise<{
+  readonly text: string
+  readonly running: boolean
+  /** an IMPROVE transaction is still recorded as in flight, so a killed batch needs recovering */
+  readonly pendingTransaction: boolean
+}> {
   if (!(await exists(paths.state))) {
-    return { text: '(아직 실행된 적 없음)', running: false }
+    return {
+      text: '(아직 실행된 적 없음)',
+      running: false,
+      pendingTransaction: false,
+    }
   }
   const state = await loadState(paths, config.threshold, config.revertThreshold)
   return {
     text: `${state.status}  iter=${state.iteration}  streak=${state.noImprovementStreak}/${config.threshold}`,
-    running: state.status === 'running',
+    running: state.status === 'running' || state.status === 'interrupted',
+    pendingTransaction: await exists(paths.iterationRecord),
   }
 }
 
@@ -161,6 +185,7 @@ export class RetryNowToolRuntime {
     }
 
     let interrupted = false
+    let pendingTransaction = false
     if (config.targets.length === 0) {
       lines.push('mode       : 전체 레포 단일 윤회')
       const state = await describeState(paths, config)
@@ -168,6 +193,7 @@ export class RetryNowToolRuntime {
       const current = await describeCurrent(paths)
       if (current !== undefined) lines.push(`current    : ${current}`)
       interrupted = state.running && activity === undefined
+      pendingTransaction = state.pendingTransaction
     } else {
       lines.push(`mode       : 패키지별 분할 (${config.targets.length} 타겟)`)
       for (const target of config.targets) {
@@ -180,13 +206,56 @@ export class RetryNowToolRuntime {
         const current = await describeCurrent(targetPaths)
         if (current !== undefined) lines.push(`    current: ${current}`)
         interrupted ||= state.running
+        pendingTransaction ||= state.pendingTransaction
       }
       interrupted &&= activity === undefined
     }
     if (interrupted) {
       lines.push(
-        'state.json은 running이지만 이 프로세스의 활성 윤회가 없어 중단된 것으로 보입니다. `retrynow_start`로 재개할 수 있습니다.',
+        '이 프로세스에 활성 윤회가 없는데 state는 진행 중으로 남아 있습니다 — 드라이버가 비정상 종료된 것으로 보입니다.',
       )
+      // Restarting FIRST is the destructive path: an interrupted batch can hold items that already
+      // passed independent review but were never committed, and a new life absorbs them into its
+      // baseline, erasing their provenance, evidence, and verdict. Recovery must come first.
+      lines.push(
+        pendingTransaction
+          ? '먼저 `retrynow_recover`를 실행하세요. 중단된 배치에 이미 리뷰를 통과한 미커밋 작업이 남아 있을 수 있고, 복구 없이 `retrynow_start`로 재개하면 그 변경이 새 생의 베이스라인에 흡수되어 출처·근거·리뷰 판정이 영구히 사라집니다.'
+          : '복구할 중단된 배치는 없습니다 — `retrynow_start`로 바로 재개할 수 있습니다.',
+      )
+    }
+    return lines.join('\n')
+  }
+
+  /**
+   * Recover a batch whose driver was killed mid-run.
+   *
+   * This exists as a TOOL, not only as a CLI command, because in plugin mode the driver lives inside
+   * the opencode process — so the very restart that kills it is the ordinary way this project is used,
+   * and a plugin user must not need a separate global CLI install to rescue their reviewed work.
+   */
+  async recover(context: RetryNowToolContext): Promise<string> {
+    if (
+      this.dependencies.controller.getLoopStatus(context.directory) !==
+      undefined
+    ) {
+      return '이 프로세스에서 윤회가 아직 돌고 있습니다. 먼저 `retrynow_stop`으로 정지시킨 뒤 복구하세요 — 실행 중인 루프의 상태를 고쳐 쓰지 않습니다.'
+    }
+    const { reports, code } = await (
+      this.dependencies.recoverProject ?? recoverProject
+    )(context.directory, {
+      commandRunner: createCommandRunner(spawnVerifyCommand),
+    })
+    const lines = reports.flatMap((report) => [...report.lines])
+    const recovered = reports.filter((report) => report.status === 'recovered')
+    if (recovered.length > 0) {
+      const kept = recovered.reduce((sum, report) => sum + report.keptCount, 0)
+      const rolled = recovered.flatMap((report) => [...report.rolledBack])
+      lines.push(
+        '',
+        `복구 완료: 리뷰 통과 ${kept}건 보존${rolled.length > 0 ? `, 미리뷰 item ${rolled.join(', ')} 롤백` : ''}. 이어서 \`retrynow_start\`로 재개하세요.`,
+      )
+    } else if (code !== 0) {
+      lines.push('', '복구를 완료하지 못했습니다 — 위 사유를 확인하세요.')
     }
     return lines.join('\n')
   }
@@ -244,7 +313,7 @@ export class RetryNowToolRuntime {
       this.completions.set(directory, { kind: 'error', message })
       log(`detached loop error: ${message}`)
     } finally {
-      await flush.catch(() => undefined)
+      await flush
       this.dependencies.controller.unregisterLoop(directory)
     }
   }
@@ -269,6 +338,12 @@ export function createRetryNowTools(
       description: '현재 프로젝트의 retry-now 윤회를 안전하게 정지합니다.',
       args: {},
       execute: (_arguments, context) => runtime.stop(context),
+    }),
+    retrynow_recover: tool({
+      description:
+        '드라이버가 비정상 종료되어 중단된 retry-now 배치를 복구합니다. 이미 독립 리뷰를 통과한 아이템만 커밋하고, 리뷰를 통과하지 못한 아이템은 백업으로 롤백합니다.',
+      args: {},
+      execute: (_arguments, context) => runtime.recover(context),
     }),
   }
 }

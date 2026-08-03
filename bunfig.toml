@@ -3,15 +3,8 @@ coverage = true
 coverageSkipTestFiles = true
 coverageThreshold = { lines = 1.0, functions = 1.0, statements = 1.0 }
 coverageReporter  = ["text", "lcov"]
-coveragePathIgnorePatterns = [
-  "**/*.js",
-  "packages/core/src/loop-driver.ts",
-  "packages/core/src/frontends.ts",
-  "packages/core/src/index.ts",
-  "packages/core/src/scaffold.ts",
-  "packages/core/src/types.ts",
-  "packages/cli/src/**",
-  "packages/claude/src/**",
-  "packages/codex/src/**",
-  "packages/opencode/src/**",
-]
+# Only build output is ignored. NO TypeScript source is exempt: every `src/**` module in every
+# package is held to the 100% threshold above, so a module cannot be excused from coverage by
+# adding it here. `scripts/check-coverage-sources.mjs` additionally fails the build when a module
+# with runtime code is never loaded by any test, which a threshold alone cannot see.
+coveragePathIgnorePatterns = ["**/*.js"]

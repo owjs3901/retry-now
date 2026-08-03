@@ -80,7 +80,7 @@ export class LoopController {
 
   constructor(
     private readonly client: NativeSessionClient,
-    private readonly log: ControllerLogger = (line) => console.error(line),
+    private readonly log: ControllerLogger = console.error,
   ) {}
 
   registerChild(sessionID: string, options: ManagedChildOptions): void {

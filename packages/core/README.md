@@ -35,8 +35,21 @@ import {
   runDriverCli,          // entrypoint used by the CLI / agent driver-entry scripts
   installFrontend,       // install the /retry-now trigger for an agent
   buildFrontendBody,     // synthesize the trigger command body
+  recoverProject,        // reconstruct a loop whose driver was killed mid-batch
+  createCommandRunner,   // wrap a spawn into the test/lint runner `recoverProject` requires
+  spawnVerifyCommand,    // the default shell spawn for configured verification commands
+  type RecoverReport,
   type FrontendInstallResult,
 } from '@retry-now/core'
+```
+
+`recoverProject` requires a `commandRunner` rather than defaulting one, so the module never creates a
+child process itself:
+
+```ts
+const { reports, code } = await recoverProject(projectRoot, {
+  commandRunner: createCommandRunner(spawnVerifyCommand),
+})
 ```
 
 The engine is dependency-light and runs on **[Bun](https://bun.sh)** ≥ 1.1.
@@ -58,6 +71,13 @@ Git regenerates its stat cache. Git-ignored files are outside the restore bounda
 restored by the driver, ordinary mid-batch aborts restore the full iteration start, and an agent-created commit
 is left untouched while a project-level HEAD quarantine blocks reruns. Repositories containing submodule/gitlink
 entries are rejected before an agent is launched.
+
+Those guarantees assume the driver is alive to enforce them, which a host restart breaks. A `driver.lock`
+still present at startup proves the previous driver was killed, so the next run transitions that run's stale
+`status: running` to `interrupted` and reports any uncommitted residue. `recoverProject` then reconstructs the
+batch from the per-item review signals and backups: it rolls the first unreviewed item back, re-runs the
+configured test/lint, proves commit attribution, and commits only the reviewed-kept prefix — refusing, with a
+reason, at any step it cannot prove.
 
 See the **[main README](https://github.com/owjs3901/retry-now#readme)** for the full model, the
 convergence rules, and configuration.

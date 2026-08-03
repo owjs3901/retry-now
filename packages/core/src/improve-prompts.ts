@@ -33,6 +33,7 @@ Single authoritative plan item: ${JSON.stringify(input.item)}
 Scope: ${input.scope || '(whole repository)'}
 Direction: ${input.config.direction.trim()}
 Backup directory: ${input.artifacts.backupDir}
+New-file manifest: ${input.artifacts.newFiles}
 Report path: ${input.artifacts.report}
 Signal path: ${input.artifacts.signal}
 Verification:
@@ -100,7 +101,12 @@ delegate to sub-agents and do not inspect or process another batch item.
 ${common(input)}
 
 Before editing, copy every existing file you will change into the backup directory while preserving
-its repository-relative path, and record every new file so rejection can delete it. Implement the
+its repository-relative path, and append every file you CREATE to the new-file manifest above, one
+repository-relative path per line. Both are mandatory and neither is optional: the backup is the only
+way this item can be rolled back, and the manifest is the only way a rollback can delete a file that
+did not exist before it. They are also what \`retry-now recover\` reads to reconstruct this item's
+disposition if the driver process is killed mid-batch, so an item with no backup directory cannot be
+recovered and must be rolled back by hand. Implement the
 smallest correct candidate and run the configured relevant verification/benchmark. Your conclusion
 is only an UNTRUSTED RECOMMENDATION for an independent reviewer. After review, the driver independently
 re-runs configured test/lint verification. A red result overrides any kept recommendation to reverted

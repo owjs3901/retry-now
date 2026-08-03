@@ -14,22 +14,26 @@ export function success<T>(data: T): NativeClientResult<T> {
 }
 
 export class FakeNativeClient implements NativeSessionClient {
+  constructor() {
+    this.createResult = success({ id: 'child-1' })
+    this.permissionResult = success(true)
+  }
+
   readonly createCalls: NativeSessionCreateOptions[] = []
   readonly promptCalls: NativePromptOptions[] = []
   readonly abortCalls: NativeAbortOptions[] = []
   readonly permissionCalls: NativePermissionReplyOptions[] = []
 
-  createResult: NativeClientResult<NativeSession> = success({ id: 'child-1' })
-  promptImplementation: (
-    options: NativePromptOptions,
-  ) => Promise<NativeClientResult<NativePromptResponse>> = async () =>
-    success({ info: {}, parts: [] })
-  abortImplementation: (
-    options: NativeAbortOptions,
-  ) => Promise<NativeClientResult<boolean>> = async () => success(true)
-  permissionImplementation: (
-    options: NativePermissionReplyOptions,
-  ) => Promise<NativeClientResult<boolean>> = async () => success(true)
+  createResult: NativeClientResult<NativeSession>
+  promptImplementation:
+    | ((
+        options: NativePromptOptions,
+      ) => Promise<NativeClientResult<NativePromptResponse>>)
+    | undefined
+  abortImplementation:
+    | ((options: NativeAbortOptions) => Promise<NativeClientResult<boolean>>)
+    | undefined
+  permissionResult: NativeClientResult<boolean>
 
   readonly session = {
     create: async (
@@ -42,13 +46,17 @@ export class FakeNativeClient implements NativeSessionClient {
       options: NativePromptOptions,
     ): Promise<NativeClientResult<NativePromptResponse>> => {
       this.promptCalls.push(options)
-      return this.promptImplementation(options)
+      if (this.promptImplementation !== undefined)
+        return this.promptImplementation(options)
+      return success({ info: {}, parts: [] })
     },
     abort: async (
       options: NativeAbortOptions,
     ): Promise<NativeClientResult<boolean>> => {
       this.abortCalls.push(options)
-      return this.abortImplementation(options)
+      if (this.abortImplementation !== undefined)
+        return this.abortImplementation(options)
+      return success(true)
     },
   }
 
@@ -56,6 +64,6 @@ export class FakeNativeClient implements NativeSessionClient {
     options: NativePermissionReplyOptions,
   ): Promise<NativeClientResult<boolean>> {
     this.permissionCalls.push(options)
-    return this.permissionImplementation(options)
+    return this.permissionResult
   }
 }

@@ -128,6 +128,59 @@ test('resolves a managed child waiter for both idle event shapes', async () => {
   await expect(statusWaiter).resolves.toBeUndefined()
 })
 
+test('rejects a managed child waiter when its deadline expires', async () => {
+  // Given
+  const controller = new LoopController(new FakeNativeClient())
+  const abortController = new AbortController()
+  controller.registerChild('child-timeout', {
+    directory,
+    skipPermissions: true,
+  })
+
+  // When
+  const waiter = controller.waitForChild(
+    'child-timeout',
+    5,
+    abortController.signal,
+  )
+
+  // Then
+  await expect(waiter).rejects.toEqual(
+    expect.objectContaining({
+      name: 'ChildSessionTimeoutError',
+      sessionID: 'child-timeout',
+      message: 'child session timed out: child-timeout',
+    }),
+  )
+})
+
+test('rejects a managed child waiter when its caller aborts', async () => {
+  // Given
+  const controller = new LoopController(new FakeNativeClient())
+  const abortController = new AbortController()
+  controller.registerChild('child-aborted', {
+    directory,
+    skipPermissions: true,
+  })
+  const waiter = controller.waitForChild(
+    'child-aborted',
+    1_000,
+    abortController.signal,
+  )
+
+  // When
+  abortController.abort()
+
+  // Then
+  await expect(waiter).rejects.toEqual(
+    expect.objectContaining({
+      name: 'ChildSessionWaitAbortedError',
+      sessionID: 'child-aborted',
+      message: 'child session wait aborted: child-aborted',
+    }),
+  )
+})
+
 test('tracks one active loop per directory and exposes stopping state', () => {
   // Given
   const controller = new LoopController(new FakeNativeClient())
@@ -163,6 +216,29 @@ test('aborts every currently active child owned by the requested directory', asy
   expect(client.abortCalls).toEqual([
     { path: { id: 'child-1' }, query: { directory } },
     { path: { id: 'child-2' }, query: { directory } },
+  ])
+})
+
+test('logs a returned SDK error when an active child cannot be aborted', async () => {
+  // Given
+  const client = new FakeNativeClient()
+  const lines: string[] = []
+  const controller = new LoopController(client, (line) => lines.push(line))
+  client.abortImplementation = async () => ({
+    data: undefined,
+    error: new Error('transport unavailable'),
+  })
+  controller.registerChild('child-failed-abort', {
+    directory,
+    skipPermissions: true,
+  })
+
+  // When
+  await controller.abortActive(directory)
+
+  // Then
+  expect(lines).toEqual([
+    '  ! 자식 세션 중단 실패 (child-failed-abort): transport unavailable',
   ])
 })
 

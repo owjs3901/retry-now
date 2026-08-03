@@ -32,6 +32,11 @@ import {
 } from './agents.ts'
 import { loadConfig } from './config.ts'
 import {
+  loadConfigBaseline,
+  reloadLogLines,
+  reloadLoopConfig,
+} from './config-reload.ts'
+import {
   commitPaths,
   formatIterationCommitMessage,
   type GitRunner,
@@ -56,7 +61,7 @@ import {
   writeText,
 } from './io.ts'
 import { SIGNAL_LIMITS } from './limits.ts'
-import { acquireDriverLock, releaseDriverLock } from './lock.ts'
+import { acquireDriverLock, releaseDriverLock, type StaleLock } from './lock.ts'
 import { DIR, pad, type Paths, resolvePaths, slugifyTarget } from './paths.ts'
 import {
   createCommandRunner,
@@ -67,12 +72,16 @@ import {
   verifyGatingCommands,
 } from './preflight.ts'
 import { quotaExhaustedInLog } from './quota.ts'
+import { writeIterationRecord } from './recover.ts'
 import {
   guardAnalyzeRepository,
   rollbackIterationRepository,
 } from './repository-guard.ts'
 import {
   captureRepositorySnapshot,
+  type RepositorySnapshot,
+  restoreRepositoryIndex,
+  restoreRepositorySnapshot,
   validateRepositoryDelta,
 } from './repository-snapshot.ts'
 import { oneLine } from './safe-text.ts'
@@ -87,6 +96,7 @@ import {
 } from './signal.ts'
 import {
   loadState,
+  markInterruptedState,
   recordImproveOutcome,
   recordNoImprovement,
   saveState,
@@ -134,7 +144,7 @@ function composeMessage(
  * Output is discarded: the preflight only needs the exit status, and streaming a full test run into
  * the driver log before the first life would bury the verdict it exists to deliver.
  */
-const spawnVerifyCommand: SpawnCommand = (command, cwd) =>
+export const spawnVerifyCommand: SpawnCommand = (command, cwd) =>
   spawn(command, { cwd, shell: true, stdio: 'ignore' })
 
 /** Spawn an agent CLI, tee its output to a log file, resolve with the exit code. */
@@ -175,6 +185,14 @@ export function runAgent(
 
 /** Existing subprocess execution path, exposed as the default AgentBackend implementation. */
 export class CliSpawnBackend implements AgentBackend {
+  /**
+   * The agent spawn is injectable for the same reason `commandRunner`, `git`, and `backend` are:
+   * this class's job is deciding WHAT to launch and how to report it, and that decision is worth
+   * testing without launching a real coding agent. Defaults to the real spawn, so
+   * `new CliSpawnBackend()` behaves exactly as before.
+   */
+  constructor(private readonly spawnAgent: typeof runAgent = runAgent) {}
+
   async run(request: PhaseInvocationRequest): Promise<PhaseRunResult> {
     const { cmd, args } = buildAgentCommand(
       request.config,
@@ -184,7 +202,7 @@ export class CliSpawnBackend implements AgentBackend {
     request.log(
       `  ↳ ${AGENT_LABEL[agentForRole(request.config, request.role)]} ${request.stage ?? request.phase} (${request.model || 'agent default'}, fresh session)…`,
     )
-    const code = await runAgent(
+    const code = await this.spawnAgent(
       cmd,
       args,
       request.cwd,
@@ -387,7 +405,7 @@ type PhaseOutcome =
   | { readonly kind: 'failed'; readonly reason: string }
 
 /** Compact human duration for wait/pause logs: 90000 -> "2m", 21600000 -> "6.0h". */
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(1)}h`
   if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`
   return `${Math.round(ms / 1000)}s`
@@ -844,7 +862,7 @@ export interface DriverResult {
   readonly threshold: number
 }
 
-type ReconcileKeptCommitOutcome =
+export type ReconcileKeptCommitOutcome =
   | {
       readonly kind: 'committed'
       readonly keptCount: number
@@ -862,7 +880,7 @@ type ReconcileKeptCommitOutcome =
  * swept in. Every refusal is returned explicitly so callers can distinguish a recorded commit from
  * work that remains in the tree; Git failure is still non-throwing and never wedges unattended use.
  */
-async function reconcileKeptCommit(
+export async function reconcileKeptCommit(
   paths: Paths,
   config: RetryNowConfig,
   iter: number,
@@ -948,10 +966,36 @@ async function residualWorkingTree(
 async function runOneLoop(
   root: string,
   target: string | null,
-  config: RetryNowConfig,
+  initialConfig: RetryNowConfig,
   opts: ResolvedDriverOptions,
   log: (line: string) => void,
 ): Promise<DriverResult> {
+  // Reassigned at every life boundary by `reloadLoopConfig` so a mid-run `config.json` edit to a
+  // loop-control counter is honoured. Everything inside one life reads a single frozen value.
+  let config = initialConfig
+  // The file as it read at startup, tracked separately from the running config because CLI flags
+  // (`--no-commit`, `--commit`) are layered on top of the latter. Comparing the layered config
+  // against the file would report the user's own override as an on-disk edit, once per life.
+  let configOnDisk = await loadConfigBaseline(root, initialConfig)
+  // The driver's own Git invoker. Injectable so the refusals it makes when Git cannot answer are
+  // reachable in tests; defaults to spawning real `git`.
+  const git = opts.git ?? runGit
+  // Every repository primitive this life uses goes through the SAME invoker. Without this the
+  // driver's own queries honoured `opts.git` while the ANALYZE guard, the per-item transaction, and
+  // the iteration rollback silently used a different one — so a run could not be reasoned about as a
+  // whole, and the failure handling of those three was unreachable.
+  // `restore` and `restoreSnapshot` are the same call under the two names the ANALYZE guard and the
+  // per-item stage transaction each expect, so one object satisfies both contracts.
+  const restore = (target: string, snapshot: RepositorySnapshot) =>
+    restoreRepositorySnapshot(target, snapshot, git)
+  const repository = {
+    capture: (target: string) => captureRepositorySnapshot(target, git),
+    head: (target: string) => headRevision(target, git),
+    restore,
+    restoreSnapshot: restore,
+    restoreIndex: (target: string, snapshot: RepositorySnapshot) =>
+      restoreRepositoryIndex(target, snapshot, git),
+  }
   const slug = target !== null ? slugifyTarget(target) : undefined
   const stateDirRel = target !== null ? `${DIR}/targets/${slug}` : DIR
   const scope = target ?? ''
@@ -997,6 +1041,21 @@ async function runOneLoop(
   state.status = 'running'
 
   while (true) {
+    // A 윤회 runs for hours or days, so `config.json` is edited WHILE it runs — usually to raise
+    // `maxIterations` or retune a threshold after watching a few lives. Re-read it HERE, at the life
+    // boundary, so the change lands on the very next stop check below instead of being silently
+    // ignored until a full stop/restart (which costs the life in flight). Only the loop-control
+    // counters are re-applied; every other changed field is reported as deliberately pinned.
+    const reload = await reloadLoopConfig(root, config, configOnDisk)
+    for (const line of reloadLogLines(reload)) log(`[${label}]${line}`)
+    config = reload.config
+    configOnDisk = reload.onDisk
+    // `state.json` carries its own copy of both thresholds and it is what `retry-now status` and the
+    // final summary report, so a re-applied threshold has to land there too or the run keeps
+    // reporting the value it started with.
+    state.threshold = config.threshold
+    state.revertThreshold = config.revertThreshold
+
     if (await exists(paths.stop)) {
       log(`[${label}] STOP 감지(.retry-now/STOP). 정지.`)
       state.status = 'stopped-manual'
@@ -1026,7 +1085,7 @@ async function runOneLoop(
 
     const analyzeSnapshot = opts.dryRun
       ? null
-      : await captureRepositorySnapshot(paths.root)
+      : await captureRepositorySnapshot(paths.root, git)
     if (!opts.dryRun && analyzeSnapshot === null) {
       state.status = 'error'
       log(
@@ -1049,6 +1108,7 @@ async function runOneLoop(
       const analyzeGuard = await guardAnalyzeRepository(
         paths.root,
         analyzeSnapshot,
+        repository,
       )
       if (analyzeGuard.kind === 'head-changed') {
         await quarantineHeadChange(paths, {
@@ -1104,22 +1164,17 @@ async function runOneLoop(
       ]
     const baselineDirty = opts.dryRun
       ? []
-      : await statusPaths(paths.root, scope ? [scope] : [])
+      : await statusPaths(paths.root, scope ? [scope] : [], git)
     const iterationSnapshot = opts.dryRun ? null : analyzeSnapshot
-    const baselineHead = opts.dryRun
-      ? '(dry-run)'
-      : (iterationSnapshot?.head ?? null)
+    // Non-null BY CONSTRUCTION, not by re-checking: a non-dry run already stopped above when the
+    // iteration snapshot was unavailable, and a captured snapshot always carries its HEAD. The
+    // separate `baselineHead === null` guard this replaces could therefore never be taken, so it
+    // protected nothing while permanently blocking the coverage gate.
+    const baselineHead = iterationSnapshot?.head ?? '(dry-run)'
     if (!opts.dryRun && baselineDirty === null) {
       state.status = 'error'
       log(
         `[${label}][${iter}] improve 시작 전 Git 상태를 읽지 못해 안전한 귀속을 보장할 수 없습니다.`,
-      )
-      break
-    }
-    if (!opts.dryRun && baselineHead === null) {
-      state.status = 'error'
-      log(
-        `[${label}][${iter}] improve 시작 전 Git HEAD를 읽지 못해 안전한 귀속을 보장할 수 없습니다.`,
       )
       break
     }
@@ -1134,10 +1189,22 @@ async function runOneLoop(
       )
       break
     }
+    // Persist the one fact a post-mortem `retry-now recover` cannot derive from anything else on
+    // disk: the HEAD this batch is required to keep immutable. Written BEFORE the first item runs, so
+    // a driver killed at any point inside the batch always leaves it behind.
+    if (!opts.dryRun && typeof baselineHead === 'string') {
+      await writeIterationRecord(paths, {
+        iteration: iter,
+        baselineHead,
+        plannedCount: planned.length,
+        scope,
+      })
+    }
     const executeItemStage = createImproveStageExecutor({
       paths,
       scope,
       dryRun: opts.dryRun,
+      repository,
       initialBaseline: baselineDirty ?? [],
       ...(iterationSnapshot === null
         ? {}
@@ -1241,37 +1308,21 @@ async function runOneLoop(
           terminalReviews,
           `${stateDirRel}/reports/${pad(iter)}-improve.md`,
         )
+        // The reviewed prefix is re-checked as a WHOLE here, then proven against the repository
+        // below. Four further checks used to sit in this spot and were removed as unreachable, not
+        // relaxed: the prefix length always equals the failing index because `runImproveBatch` pushes
+        // exactly one review per completed item; re-validating each review repeated the IDENTICAL
+        // `validateImproveSignal(signal, [item])` call it already had to pass to be accepted; and the
+        // snapshot/baseline null cases already stopped this life before IMPROVE began. Each could
+        // never fire, so it protected nothing while permanently blocking the coverage gate.
         let partialIssue = validateImproveSignal(improveSig, planned)
-        if (partialIssue === null && b.reviews.length !== b.itemIndex) {
-          partialIssue = `reviewed prefix length ${b.reviews.length} does not match failing item index ${b.itemIndex}`
-        }
-        if (partialIssue === null) {
-          for (const [reviewIndex, review] of b.reviews.entries()) {
-            const plannedItem = planned[reviewIndex]
-            if (plannedItem === undefined) {
-              partialIssue = `reviewed prefix item ${reviewIndex + 1} is outside the analyze plan`
-              break
-            }
-            const reviewIssue = validateImproveSignal(review, [plannedItem])
-            if (reviewIssue !== null) {
-              partialIssue = `reviewed prefix item ${plannedItem.id} is invalid: ${reviewIssue}`
-              break
-            }
-          }
-        }
         if (partialIssue === null && b.repository === 'unknown') {
           partialIssue = `item ${b.itemId} repository disposition is unknown`
-        }
-        if (partialIssue === null && iterationSnapshot === null) {
-          partialIssue = 'iteration-start repository snapshot is unavailable'
-        }
-        if (partialIssue === null && baselineDirty === null) {
-          partialIssue = 'pre-IMPROVE dirty-file baseline is unavailable'
         }
 
         const currentSnapshot =
           partialIssue === null
-            ? await captureRepositorySnapshot(paths.root)
+            ? await captureRepositorySnapshot(paths.root, git)
             : null
         if (partialIssue === null && currentSnapshot === null) {
           partialIssue = 'current repository snapshot is unavailable'
@@ -1308,7 +1359,7 @@ async function runOneLoop(
         }
         const currentDirty =
           partialIssue === null
-            ? await statusPaths(paths.root, scope ? [scope] : [])
+            ? await statusPaths(paths.root, scope ? [scope] : [], git)
             : null
         if (partialIssue === null && currentDirty === null) {
           partialIssue = 'current changed-file attribution is unavailable'
@@ -1342,6 +1393,7 @@ async function runOneLoop(
           baselineDirty,
           scope,
           log,
+          git,
         )
         if (commitOutcome.kind === 'refused') {
           state.status = 'error'
@@ -1372,6 +1424,7 @@ async function runOneLoop(
         const restoreIssue = await rollbackIterationRepository(
           paths.root,
           iterationSnapshot,
+          repository,
         )
         if (restoreIssue !== null) {
           state.status = 'error'
@@ -1390,7 +1443,7 @@ async function runOneLoop(
     const improveSig = b.signal
     const finalHead = opts.dryRun
       ? baselineHead
-      : await headRevision(paths.root)
+      : await headRevision(paths.root, git)
     if (!opts.dryRun && finalHead !== baselineHead) {
       if (typeof baselineHead === 'string' && finalHead !== null) {
         await quarantineHeadChange(paths, {
@@ -1428,6 +1481,7 @@ async function runOneLoop(
         baselineDirty,
         scope,
         log,
+        git,
       )
       if (commitOutcome.kind === 'refused') {
         log(
@@ -1437,6 +1491,9 @@ async function runOneLoop(
     }
     state.iteration = iter
     await saveState(paths, state)
+    // The batch closed cleanly, so there is no in-flight transaction left for `recover` to reason
+    // about. Dropping the record keeps "this file exists" an honest signal of an unfinished batch.
+    await rm(paths.iterationRecord, { force: true })
   }
 
   await saveState(paths, state)
@@ -1444,7 +1501,7 @@ async function runOneLoop(
   // e.g. a crashed IMPROVE's leftovers or a rogue ANALYZE edit — so the user can review it.
   const residue = opts.dryRun
     ? []
-    : await residualWorkingTree(paths.root, scope)
+    : await residualWorkingTree(paths.root, scope, git)
   if (residue.length > 0) {
     log(
       `[${label}] ⚠ 종료 시 워킹트리에 미정리 변경 ${residue.length}건 — 커밋도 리버트도 안 됨(검토 필요):`,
@@ -1469,6 +1526,73 @@ async function runOneLoop(
  * Run the loop(s) to a terminal state. Whole-repo when `config.targets` is empty, else one
  * independent loop per target. Resolves an aggregate result when everything stops.
  */
+/**
+ * Report — and correct — a run that died without recording a terminal status.
+ *
+ * A driver that stops for any reason of its own releases its lock, so finding a lock file at startup
+ * proves the previous driver was KILLED: an editor/host restart, a hard kill, or an OS crash. A 윤회
+ * runs for hours or days, so that is an ordinary event, not an exceptional one, and the state it
+ * leaves behind is actively misleading: `state.json` still claims `running`, and any
+ * reviewed-but-uncommitted work still sits in the working tree, one life away from being absorbed
+ * into a fresh baseline that erases its provenance, evidence, and review verdict.
+ *
+ * This never mutates the repository — it only makes the state honest and tells the user that
+ * `retry-now recover` is the operation that reconstructs per-item verdicts.
+ */
+async function reportInterruptedRun(
+  root: string,
+  config: RetryNowConfig,
+  stale: StaleLock,
+  log: (line: string) => void,
+): Promise<void> {
+  const holder = stale.pid === null ? 'pid 불명' : `pid ${stale.pid}`
+  const started = stale.startedAt === null ? '' : `, 시작 ${stale.startedAt}`
+  const own = stale.own ? ' (같은 프로세스의 이전 실행)' : ''
+  log(
+    `이전 드라이버(${holder}${started})${own}가 종료 상태를 남기지 못했습니다 — stale driver.lock을 회수했습니다.`,
+  )
+
+  const slugs =
+    config.targets.length === 0
+      ? [undefined]
+      : config.targets.map((target) => slugifyTarget(target))
+  let corrected = 0
+  for (const slug of slugs) {
+    const statePaths = resolvePaths(root, slug)
+    const state = await markInterruptedState(
+      statePaths,
+      config.threshold,
+      config.revertThreshold,
+    )
+    if (state === null) continue
+    corrected++
+    log(
+      `  · ${statePaths.state}: status running → interrupted (생 ${state.iteration}까지 기록됨)`,
+    )
+  }
+  if (corrected === 0) {
+    log('  이전 실행은 이미 종료 상태를 기록했습니다 — 정정할 것이 없습니다.')
+    return
+  }
+
+  const residue = await residualWorkingTree(root, '')
+  if (residue.length === 0) {
+    log('  워킹트리가 깨끗합니다 — 미커밋 잔재는 없습니다.')
+    return
+  }
+  log(
+    `  ⚠ 미커밋 잔재 ${residue.length}건 — 이미 독립 리뷰를 통과한 작업이 섞여 있을 수 있습니다:`,
+  )
+  for (const line of residue.slice(0, 20)) log(`      ${line}`)
+  if (residue.length > 20) log(`      … (+${residue.length - 20}건 더)`)
+  log(
+    '  → `retry-now recover` 를 먼저 실행하세요. 아이템별 리뷰 판정을 복원해 kept만 커밋하고 미리뷰 아이템은 백업으로 롤백합니다.',
+  )
+  log(
+    '  → 복구 없이 그대로 진행하면 이 변경들이 새 생의 베이스라인에 흡수되어 출처·근거·리뷰 판정이 영구히 사라집니다.',
+  )
+}
+
 /**
  * Run the loop(s) under a project-local single-instance lock. A SECOND driver launched on the SAME
  * project is refused — that same-project double-run is the ONLY way `.retry-now/` state can contend.
@@ -1503,6 +1627,12 @@ export async function runLoop(
       finalStreak: 0,
       threshold: config.threshold,
     }
+  }
+  // A reclaimed lock is the only in-band proof that the previous driver was killed rather than
+  // stopped. Correct the state it lied about BEFORE the first life starts, so a new baseline can
+  // never quietly absorb the dead run's reviewed work.
+  if (lock.reclaimed !== undefined && !opts.dryRun) {
+    await reportInterruptedRun(opts.cwd, config, lock.reclaimed, log)
   }
   try {
     return await runLoopBody(config, resolvedOpts, log)

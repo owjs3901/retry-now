@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path'
 import type { Plugin } from '@opencode-ai/plugin'
 import {
   buildPluginCommandFile,
+  buildPluginRecoverCommandFile,
   buildPluginStatusCommandFile,
   buildPluginStopCommandFile,
 } from '@retry-now/core'
@@ -35,9 +36,11 @@ import {
   isSessionIdleEvent,
   retryNowCommandSessionID,
 } from './native/plugin-events.ts'
-import { createRetryNowTools, RetryNowToolRuntime } from './tools.ts'
-
-let loopController: LoopController | undefined
+import {
+  createRetryNowTools,
+  type RetryNowToolDependencies,
+  RetryNowToolRuntime,
+} from './tools.ts'
 
 /**
  * Materialise (or refresh) the opencode command file that exposes `/retry-now`.
@@ -50,6 +53,7 @@ export function ensureCommandFile(homeDirectory?: string): void {
       buildPluginCommandFile(),
       buildPluginStatusCommandFile(),
       buildPluginStopCommandFile(),
+      buildPluginRecoverCommandFile(),
     ]) {
       const dest = join(home, file.homePath)
       if (existsSync(dest) && readFileSync(dest, 'utf8') === file.content)
@@ -67,50 +71,69 @@ export function ensureCommandFile(homeDirectory?: string): void {
 // command directories to build their slash-command registries.
 ensureCommandFile()
 
-export const RetryNowPlugin: Plugin = async ({ client, directory }) => {
-  const controller = loopController ?? new LoopController(client)
-  loopController = controller
-  const runtime = new RetryNowToolRuntime({ client, controller })
-  // Start the loop from the `/retry-now` command itself — no agent-callable tool. Bus events fire
-  // for every session regardless of the active (possibly curated) agent, so `/retry-now` works
-  // everywhere. `command.executed` records the parent session; `session.idle` is when we actually
-  // start, so STEP 1 has already written `.retry-now/config.json`. `start()` is idempotent.
-  const autoStart = new AutoStartCoordinator({
-    start: async (parentSessionID) => {
-      // Resolve the project from the COMMAND'S SESSION, not this plugin instance's `directory`: in a
-      // multi-project opencode session the bus event may reach ANY instance, so `input.directory` is
-      // unreliable (it points at whichever project that instance was created for). The session's own
-      // directory is authoritative and instance-independent, so `/retry-now` always starts the loop
-      // for the project it was actually run in.
-      let dir = directory
-      try {
-        const res = await client.session.get({
-          path: { id: parentSessionID },
-        })
-        const resolved = res?.data?.directory
-        if (typeof resolved === 'string' && resolved.length > 0) dir = resolved
-      } catch {
-        // The session lookup is best-effort; fall back to this instance's directory.
-      }
-      await runtime.start({}, { directory: dir, sessionID: parentSessionID })
-      return controller.getLoopStatus(dir) !== undefined
-    },
-    log: (line) => {
-      console.error(line)
-    },
-  })
-  return {
-    event: async ({ event }) => {
-      controller.handleEvent(event)
-      const commandSessionID = retryNowCommandSessionID(event)
-      if (commandSessionID !== undefined) {
-        await autoStart.onCommandExecuted(commandSessionID)
-        return
-      }
-      if (isSessionIdleEvent(event)) await autoStart.onIdle()
-    },
-    tool: createRetryNowTools(runtime),
+interface RetryNowPluginDependencies extends Pick<
+  RetryNowToolDependencies,
+  'runLoop'
+> {
+  readonly log?: (line: string) => void
+}
+
+export function createRetryNowPlugin(
+  dependencies: RetryNowPluginDependencies = {},
+): Plugin {
+  let loopController: LoopController | undefined
+  return async ({ client, directory }) => {
+    const controller = loopController ?? new LoopController(client)
+    loopController = controller
+    const runtime = new RetryNowToolRuntime({
+      client,
+      controller,
+      ...(dependencies.runLoop === undefined
+        ? {}
+        : { runLoop: dependencies.runLoop }),
+    })
+    // Start the loop from the `/retry-now` command itself — no agent-callable tool. Bus events fire
+    // for every session regardless of the active (possibly curated) agent, so `/retry-now` works
+    // everywhere. `command.executed` records the parent session; `session.idle` is when we actually
+    // start, so STEP 1 has already written `.retry-now/config.json`. `start()` is idempotent.
+    const autoStart = new AutoStartCoordinator({
+      start: async (parentSessionID) => {
+        // Resolve the project from the COMMAND'S SESSION, not this plugin instance's `directory`: in a
+        // multi-project opencode session the bus event may reach ANY instance, so `input.directory` is
+        // unreliable (it points at whichever project that instance was created for). The session's own
+        // directory is authoritative and instance-independent, so `/retry-now` always starts the loop
+        // for the project it was actually run in.
+        let dir = directory
+        try {
+          const res = await client.session.get({
+            path: { id: parentSessionID },
+          })
+          const resolved = res?.data?.directory
+          if (typeof resolved === 'string' && resolved.length > 0)
+            dir = resolved
+        } catch {
+          // The session lookup is best-effort; fall back to this instance's directory.
+        }
+        await runtime.start({}, { directory: dir, sessionID: parentSessionID })
+        return controller.getLoopStatus(dir) !== undefined
+      },
+      log: dependencies.log ?? console.error,
+    })
+    return {
+      event: async ({ event }) => {
+        controller.handleEvent(event)
+        const commandSessionID = retryNowCommandSessionID(event)
+        if (commandSessionID !== undefined) {
+          await autoStart.onCommandExecuted(commandSessionID)
+          return
+        }
+        if (isSessionIdleEvent(event)) await autoStart.onIdle()
+      },
+      tool: createRetryNowTools(runtime),
+    }
   }
 }
+
+export const RetryNowPlugin: Plugin = createRetryNowPlugin()
 
 export default RetryNowPlugin

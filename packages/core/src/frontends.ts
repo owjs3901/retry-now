@@ -209,9 +209,15 @@ Show the CURRENT retry-now progress for THIS project, then stop. Do NOT modify a
 Do EXACTLY this:
 1. Read \`.retry-now/state.json\` (status, iteration, streaks) and \`.retry-now/current.json\` (current phase). If \`.retry-now/\` does not exist, tell the user the loop has not run yet and stop.
 2. Read the LAST ~40 lines of \`.retry-now/logs/plugin.log\` — the driver's live progress; the newest \`=== driver start\` block is the current run.
-3. Tell the user that each live phase runs as its own child session titled \`retry-now #NNNN\` — they open one with Ctrl+X to watch it live.
+3. Check whether \`.retry-now/iteration.json\` exists. It is present ONLY while an IMPROVE batch is in flight.
+4. Tell the user that each live phase runs as its own child session titled \`retry-now #NNNN\` — they open one with Ctrl+X to watch it live.
 
 Then give a short summary in the user's language: whether the loop is running, which iteration + phase, and the last few progress lines.
+
+If \`state.json\` says \`running\` or \`interrupted\` but no driver is live (the log has no recent activity), the previous driver was killed — a host/editor restart does this. In that case ALSO warn the user:
+
+- If \`.retry-now/iteration.json\` EXISTS, an interrupted batch may still hold items that already passed independent review but were never committed. They must run \`retrynow_recover\` (or \`retry-now recover\`) **before** restarting: resuming first absorbs those changes into the new life's baseline and their provenance, evidence, and review verdicts are lost permanently.
+- If it does NOT exist, there is nothing to recover and the loop can simply be restarted.
 `,
   }
 }
@@ -235,6 +241,55 @@ Stop the retry-now loop for THIS project. Do EXACTLY this and nothing else:
 Write an EMPTY file at \`.retry-now/STOP\`. The running loop halts at the next phase boundary — the current phase finishes first, then it stops before the next one.
 
 Then confirm to the user, in their language, that STOP was written and the loop will stop at the next boundary. Do NOT modify any other file.
+`,
+  }
+}
+
+/**
+ * An opencode command that RECOVERS a loop whose driver was killed mid-batch.
+ *
+ * Unlike status and stop, recovery cannot be expressed with `Read`/`Write`: it has to roll a file
+ * tree back from per-item backups, re-run the project's test/lint, and make a Git commit. So this
+ * command shells out to the CLI, which is the same engine the `retrynow_recover` tool calls.
+ *
+ * It exists because that TOOL is invisible to a curated orchestrator agent that filters
+ * plugin-registered tools — the very reason the status and stop commands are tool-free. Without this
+ * file such an agent could be warned that reviewed work is at risk and have no way to act on it.
+ */
+export function buildPluginRecoverCommandFile(): FrontendFile {
+  return {
+    projectPath: '.opencode/command/retry-now-recover.md',
+    homePath: '.config/opencode/command/retry-now-recover.md',
+    invoke: '/retry-now-recover',
+    content: `---
+description: retry-now — recover a loop whose driver was killed mid-batch (중단 복구)
+---
+
+Recover the retry-now loop for THIS project after its driver was killed (a host/editor restart does
+this). Items that already passed independent review may be sitting UNCOMMITTED in the working tree;
+starting a new life first would absorb them into a fresh baseline and destroy their provenance,
+evidence, and review verdicts permanently.
+
+Do EXACTLY this and nothing else:
+
+1. If \`.retry-now/\` does not exist, tell the user the loop has never run and stop.
+2. Run this command from the project root and show the user its full output:
+
+   \`\`\`
+   bunx @retry-now/cli recover
+   \`\`\`
+
+   (If \`retry-now\` is installed globally, \`retry-now recover\` is equivalent.)
+3. Do NOT edit any file yourself, do NOT commit anything yourself, and do NOT start the loop.
+
+The command is safe to run when there is nothing to recover — it reports that and changes nothing. It
+also refuses, with a reason, at any step it cannot prove: a live driver still holding the lock, a
+missing per-item backup, review signals that are not a contiguous prefix, a commit that appeared
+during the batch, a red test/lint run after the rollback, or a changed file it cannot attribute. A
+refusal leaves the repository untouched for the user to inspect — report it verbatim and stop.
+
+Then summarise in the user's language: which items were kept and committed, which item was rolled
+back and why, and that \`/retry-now\` resumes from the next life.
 `,
   }
 }
