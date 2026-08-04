@@ -17,7 +17,7 @@ import type { Dirent } from 'node:fs'
 import { copyFile, mkdir, readdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import { isSafeRepoFilePath } from './git.ts'
+import { isSafeGitListedPath } from './git.ts'
 import { readText } from './io.ts'
 import { type ImproveItemPaths, NEW_FILES_MANIFEST } from './paths.ts'
 
@@ -85,7 +85,14 @@ export async function readNewFileManifest(path: string): Promise<string[]> {
 }
 
 function scopeIssue(path: string, scope: string): string | null {
-  if (!isSafeRepoFilePath(path)) {
+  // Containment only, deliberately permitting glob metacharacters: these paths name repository files
+  // the item backed up or created, they are only ever `resolve()`d for a direct copy/delete (never
+  // expanded as a glob or a pathspec), and the scope check below plus the traversal/absolute/
+  // drive-letter/control-character guards inside the predicate keep every one of them inside the
+  // configured scope. Rejecting `app/blog/[slug]/page.tsx` here would refuse the ROLLBACK of any
+  // item that touched a Next.js/SvelteKit/Remix route file — the failure mode that leaves an
+  // unreviewed change in the tree, which is strictly worse than copying a bracketed filename.
+  if (!isSafeGitListedPath(path)) {
     return `unsafe repository-relative path in the item backup: ${path}`
   }
   const normalized = scope.replace(/\\/g, '/').replace(/\/$/, '')

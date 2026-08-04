@@ -19,6 +19,7 @@ import {
   type GitRunner,
   headRevision,
   isGitRepo,
+  isSafeGitListedPath,
   isSafeRepoFilePath,
   runGit,
   statusPaths,
@@ -204,6 +205,86 @@ test('commitPaths: rejects Git magic, traversal, absolute paths, and directories
 
   expect(result.code).toBe(-1)
   expect(calls).toEqual([])
+
+  // A bracketed Next.js/SvelteKit/Remix route file is ORDINARY tracked content, and every path below
+  // is handed to Git as a `:(literal)` pathspec, which disables pathspec magic outright — so the
+  // glob metacharacters in its name must not cost the iteration its commit.
+  const routeFile = 'app/blog/[slug]/page.tsx'
+  const accepted: string[][] = []
+  const accepting: GitRunner = (args) => {
+    accepted.push([...args])
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' })
+  }
+  const routeResult = await commitPaths(
+    '/repo',
+    [routeFile],
+    'message',
+    accepting,
+  )
+
+  expect(routeResult.code).toBe(0)
+  expect(accepted).toEqual([
+    ['add', '-A', '--', `:(literal)${routeFile}`],
+    ['commit', '-m', 'message', '--', `:(literal)${routeFile}`],
+  ])
+
+  // The guards that actually keep a path inside this repository still reject everything they did.
+  for (const unsafe of [':(top)**', '../secret.txt', 'C:\\secret.txt', '.']) {
+    const rejectedCalls: string[][] = []
+    const rejecting: GitRunner = (args) => {
+      rejectedCalls.push([...args])
+      return Promise.resolve({ code: 0, stdout: '', stderr: '' })
+    }
+    expect(
+      (await commitPaths('/repo', [unsafe], 'message', rejecting)).code,
+    ).toBe(-1)
+    expect(rejectedCalls).toEqual([])
+  }
+})
+
+test('the relaxed Git-listed predicate permits glob metacharacters and nothing else the strict one blocks', () => {
+  // Real filenames from the frameworks the strict predicate locked retry-now out of.
+  for (const path of [
+    'app/docs/[...name]/page.tsx',
+    'app/blog/[slug]/page.tsx',
+    'src/routes/[[...catchAll]]/+page.svelte',
+    'scripts/report{final}.md',
+    'assets/star*.svg',
+    'docs/faq?.md',
+    'src/일반/파일.ts',
+  ]) {
+    expect(isSafeGitListedPath(path)).toBe(true)
+    // Same paths, still rejected by the strict predicate reserved for uncorroborated agent text.
+    expect(isSafeRepoFilePath(path)).toBe(
+      !['*', '?', '[', ']', '{', '}'].some((token) => path.includes(token)),
+    )
+  }
+
+  // Containment is NOT relaxed: both predicates reject every one of these.
+  for (const path of [
+    '',
+    '.',
+    '..',
+    'src/../../secret.txt',
+    '../secret.txt',
+    './src/file.ts',
+    '/etc/passwd',
+    'C:\\secret.txt',
+    'c:/secret.txt',
+    ':(top)**',
+    ':!excluded',
+    'src//file.ts',
+    'src/',
+    'bad\u001bpath.ts',
+    'bad\u202epath.ts',
+    'x'.repeat(501),
+  ]) {
+    expect(isSafeGitListedPath(path)).toBe(false)
+    expect(isSafeRepoFilePath(path)).toBe(false)
+  }
+
+  // The cap is a boundary, not an approximation.
+  expect(isSafeGitListedPath('x'.repeat(500))).toBe(true)
 })
 
 test('formatIterationCommitMessage strips controls and bounds agent-authored text', () => {

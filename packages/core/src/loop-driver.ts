@@ -79,6 +79,7 @@ import {
 } from './repository-guard.ts'
 import {
   captureRepositorySnapshot,
+  captureRepositorySnapshotResult,
   type RepositorySnapshot,
   restoreRepositoryIndex,
   restoreRepositorySnapshot,
@@ -101,7 +102,13 @@ import {
   recordNoImprovement,
   saveState,
 } from './state.ts'
-import { BANNER, converged, rebirth, revertConverged } from './theme.ts'
+import {
+  BANNER,
+  converged,
+  rebirth,
+  revertConverged,
+  snapshotFailure,
+} from './theme.ts'
 import type {
   AgentRole,
   CommandRunner,
@@ -1083,16 +1090,18 @@ async function runOneLoop(
     log('─'.repeat(56))
     log(`${rebirth(iter)}${target ? ` · ${target}` : ''}`)
 
-    const analyzeSnapshot = opts.dryRun
+    const analyzeCapture = opts.dryRun
       ? null
-      : await captureRepositorySnapshot(paths.root, git)
-    if (!opts.dryRun && analyzeSnapshot === null) {
+      : await captureRepositorySnapshotResult(paths.root, git)
+    if (analyzeCapture?.kind === 'failed') {
       state.status = 'error'
       log(
-        `[${label}][${iter}] ANALYZE 시작 전 Git-visible 저장소 스냅샷을 만들 수 없습니다. 충돌 상태 또는 서브모듈을 확인하세요.`,
+        `[${label}][${iter}] ANALYZE 시작 전 Git-visible 저장소 스냅샷을 만들 수 없습니다 — ${snapshotFailure(analyzeCapture.failure)}`,
       )
       break
     }
+    const analyzeSnapshot =
+      analyzeCapture === null ? null : analyzeCapture.snapshot
     const a = await runPhaseResilient(
       paths,
       config,

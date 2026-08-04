@@ -1,4 +1,4 @@
-import { isSafeRepoFilePath } from './git.ts'
+import { isSafeGitListedPath } from './git.ts'
 import { SIGNAL_LIMITS } from './limits.ts'
 import { hasUnsafeTextCharacter } from './safe-text.ts'
 import type { PlannedImprovement, Signal } from './types.ts'
@@ -69,8 +69,16 @@ export function validateImproveSignal(
       if (!item.files || item.files.length === 0) {
         return `kept item ${item.id} must report files`
       }
+      // Containment only, deliberately permitting glob metacharacters: a kept file names real
+      // repository content the driver must then act on, and it is corroborated downstream — the
+      // driver proves every kept path is an exact `git status -z` entry
+      // (`validateCommitFileAttribution`) and a real snapshot delta (`validateRepositoryDelta`)
+      // before it commits it as a `:(literal)` pathspec. Rejecting `app/blog/[slug]/page.tsx` here
+      // would fail the review signal of any item that touched a Next.js/SvelteKit/Remix route file,
+      // which is the very breakage the relaxed predicate exists to end — and it would fail it
+      // upstream of the commit, leaving `commitPaths` unreachable for those paths.
       for (const file of item.files) {
-        if (!isSafeRepoFilePath(file)) {
+        if (!isSafeGitListedPath(file)) {
           return `kept item ${item.id} reported unsafe file path`
         }
       }

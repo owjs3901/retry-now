@@ -14,6 +14,7 @@ import { expect, test } from 'bun:test'
 import { type GitResult, type GitRunner, runGit } from '../git.ts'
 import {
   captureRepositorySnapshot,
+  captureRepositorySnapshotResult,
   repositoryDelta,
   type RepositorySnapshot,
   restoreRepositoryIndex,
@@ -165,6 +166,147 @@ test('capture rethrows non-missing filesystem errors', async () => {
   )
 
   await expect(capture).rejects.toThrow('EACCES')
+})
+
+const ROUTE = 'app/docs/[...name]/page.tsx'
+
+test('real Git capture succeeds on a repository tracking a bracketed route directory', async () => {
+  // The regression: `[...name]/` is the standard Next.js catch-all segment, and one such directory
+  // used to null the ENTIRE path list, so no life could ever start on these repositories.
+  const source = 'export default function Page() {\n  return null\n}\n'
+  const root = await initRepo({
+    [ROUTE]: source,
+    'app/blog/[slug]/page.tsx': 'export default function Post() {}\n',
+    'src/routes/[[...catchAll]]/+page.svelte': '<slot />\n',
+    'src/value.ts': 'base\n',
+  })
+  try {
+    const capture = await captureRepositorySnapshotResult(root)
+    expect(capture.kind).toBe('snapshot')
+    if (capture.kind !== 'snapshot') return
+
+    const paths = [...capture.snapshot.entries.keys()]
+    expect(paths).toContain(ROUTE)
+    expect(paths).toContain('app/blog/[slug]/page.tsx')
+    expect(paths).toContain('src/routes/[[...catchAll]]/+page.svelte')
+    const entry = capture.snapshot.entries.get(ROUTE)
+    expect(entry?.kind === 'file' ? entry.content : null).toEqual(
+      Buffer.from(source),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('restore round-trips a bracketed route file byte-for-byte', async () => {
+  const source = 'export default function Page() {\n  return null\n}\n'
+  const root = await initRepo({ [ROUTE]: source })
+  try {
+    const snapshot = await captureRepositorySnapshot(root)
+    expect(snapshot).not.toBeNull()
+    if (snapshot === null) return
+    const absolute = join(root, ROUTE)
+    await writeFile(absolute, 'mutated by ANALYZE\n')
+
+    expect(await restoreRepositorySnapshot(root, snapshot)).toBeNull()
+    expect(await readFile(absolute)).toEqual(Buffer.from(source))
+    expect((await runGit(['status', '--porcelain'], root)).stdout).toBe('')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test('capture rejects a path that escapes the repository and names it', async () => {
+  // Containment is NOT relaxed: only the glob metacharacter list was. Each of these would put the
+  // snapshot's `resolve(root, path)` capture/restore outside the repository, or smuggle a control
+  // character into a diagnostic, so each must still fail the whole transaction boundary.
+  for (const path of [
+    '../secret.txt',
+    'src/../../secret.txt',
+    '/etc/passwd',
+    'C:/secret.txt',
+    'bad\u001bpath.ts',
+    'x'.repeat(501),
+  ]) {
+    expect(
+      await captureRepositorySnapshotResult(
+        ROOT,
+        fakeGit({ paths: () => [path] }),
+        fakeFiles(),
+      ),
+    ).toEqual({ kind: 'failed', failure: { reason: 'unsafe-path', path } })
+  }
+})
+
+test('capture names the submodule path when it rejects a gitlink', async () => {
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      fakeGit({ staged: () => ['160000 abcdef 0\tvendor/dependency'] }),
+      fakeFiles(),
+    ),
+  ).toEqual({
+    kind: 'failed',
+    failure: { reason: 'gitlink', path: 'vendor/dependency' },
+  })
+})
+
+test('capture reports a Git failure for an unreadable HEAD, listing, or staged index', async () => {
+  const injected = (
+    predicate: (args: readonly string[]) => boolean,
+  ): GitRunner => {
+    const working = fakeGit()
+    return (args, cwd) =>
+      predicate(args) ? result('', 1, 'injected') : working(args, cwd)
+  }
+  const failure = {
+    kind: 'failed',
+    failure: { reason: 'git-failed' },
+  } as const
+
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      injected(
+        (args) => args[0] === 'rev-parse' && !args.includes('--git-path'),
+      ),
+      fakeFiles(),
+    ),
+  ).toEqual(failure)
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      injected((args) => args[0] === 'ls-files' && args.includes('--cached')),
+      fakeFiles(),
+    ),
+  ).toEqual(failure)
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      injected((args) => args[0] === 'ls-files' && args.includes('--stage')),
+      fakeFiles(),
+    ),
+  ).toEqual(failure)
+})
+
+test('capture distinguishes a HEAD that moved from an index that moved', async () => {
+  let headReads = 0
+  let indexReads = 0
+
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      fakeGit({ head: () => (headReads++ === 0 ? HEAD : 'changed-head') }),
+      fakeFiles(),
+    ),
+  ).toEqual({ kind: 'failed', failure: { reason: 'head-moved' } })
+  expect(
+    await captureRepositorySnapshotResult(
+      ROOT,
+      fakeGit({ index: () => (indexReads++ === 0 ? INDEX : 'changed-index') }),
+      fakeFiles(),
+    ),
+  ).toEqual({ kind: 'failed', failure: { reason: 'index-moved' } })
 })
 
 test('capture rejects repositories containing tracked gitlinks', async () => {
@@ -402,6 +544,24 @@ test('restore recreates directory and symlink entries', async () => {
     kind: 'symlink',
     target: 'target.txt',
   })
+})
+
+test('restore refuses when the current repository paths cannot be listed', async () => {
+  const approved: RepositorySnapshot = {
+    head: HEAD,
+    indexTree: INDEX,
+    indexFile: INDEX_FILE,
+    entries: new Map(),
+  }
+  const working = fakeGit()
+  const git: GitRunner = (args, cwd) =>
+    args[0] === 'ls-files' ? result('', 1, 'injected') : working(args, cwd)
+
+  // Without the current listing there is no way to know which files exist to be restored, so
+  // restoration must refuse outright rather than restore a partial set.
+  expect(
+    await restoreRepositorySnapshot(ROOT, approved, git, fakeFiles()),
+  ).toBe('current repository paths are unavailable')
 })
 
 test('index and snapshot restoration reject a changed HEAD', async () => {

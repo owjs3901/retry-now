@@ -106,6 +106,20 @@ function cleanPlanned(v: unknown): PlannedImprovement[] | undefined {
     const id = optStr(item.id)
     const title = optStr(item.title)
     if (id === undefined || title === undefined) continue
+    // DELIBERATELY the STRICT predicate — the one place that keeps it. `targetFiles` is the only
+    // path list the loop merely REPEATS as advice: it is rendered into the implement prompt
+    // (`improve-prompts.ts`) and is never a pathspec, a filesystem path, or part of a transaction, so
+    // it is also the only path list accepted purely on the agent's word, with nothing downstream to
+    // corroborate it. Every path list the driver ACTS on (snapshot, commit, restore, delete) uses the
+    // relaxed `isSafeGitListedPath` instead, because there a rejected path aborts real work.
+    //
+    // KNOWN LIMITATION, accepted: a Next.js/SvelteKit/Remix route path such as
+    // `app/blog/[slug]/page.tsx` is dropped from this advisory list, so a plan item consisting only
+    // of such files carries no `targetFiles` and the implement prompt falls back to its placeholder
+    // example path. Nothing else degrades — `validateAnalyzeSignal` never requires `targetFiles`, the
+    // item's title/approach/verification carry the actual instruction, and the item's own kept files
+    // are validated by the relaxed predicate — so the loop still runs and commits normally on those
+    // repositories.
     const targetFiles = Array.isArray(item.targetFiles)
       ? [
           ...new Set(

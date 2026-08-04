@@ -4,6 +4,7 @@
  * (consummated) — i.e. N consecutive lives find nothing left to improve.
  */
 
+import type { SnapshotFailure } from './repository-snapshot.ts'
 import { VERSION } from './version.ts'
 
 export const OATH = [
@@ -45,6 +46,30 @@ export function revertConverged(threshold: number): string {
 
 export function oathBlock(): string {
   return OATH.map((l) => `  ${l}`).join('\n')
+}
+
+/**
+ * Why a Git-visible 스냅샷 could not be taken, in the user's language.
+ *
+ * The driver refuses to launch ANALYZE without a snapshot, so this line is the ENTIRE explanation the
+ * user gets for a repository just declared unusable. It therefore names the measured cause — and the
+ * offending path when there is one — instead of listing what the cause might have been: the previous
+ * "충돌 상태 또는 서브모듈을 확인하세요" guess sent people hunting for conflicts and submodules that
+ * did not exist, when the real cause was one unsafe path.
+ */
+export function snapshotFailure(failure: SnapshotFailure): string {
+  switch (failure.reason) {
+    case 'gitlink':
+      return `서브모듈(gitlink) 항목이 포함되어 있습니다: ${failure.path}`
+    case 'unsafe-path':
+      return `안전하지 않은 저장소 경로가 있습니다: ${failure.path}`
+    case 'head-moved':
+      return '스냅샷을 만드는 동안 Git HEAD가 변경되었습니다.'
+    case 'index-moved':
+      return '스냅샷을 만드는 동안 Git 인덱스(staged tree)가 변경되었습니다.'
+    case 'git-failed':
+      return 'Git 명령이 실패했습니다(HEAD·인덱스·파일 목록 조회 실패).'
+  }
 }
 
 /**
