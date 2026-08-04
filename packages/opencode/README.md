@@ -45,13 +45,32 @@ opencode SDK**, nested under the session that invoked `/retry-now` and visible i
 with zero copied context, so the context-zero rebirth invariant holds exactly as it does for the CLI
 path below.
 
-Three tools drive it:
+Four tools drive it:
 
 | Tool | What it does |
 |---|---|
 | `retrynow_start` | Starts the loop for the current project in the background and returns immediately |
 | `retrynow_status` | Reports `state.json`, the active phase, and whether a `STOP` sentinel is pending |
 | `retrynow_stop` | Writes the `STOP` sentinel and immediately aborts the in-flight child session |
+| `retrynow_recover` | Recovers a batch whose driver was killed: commits the items that already passed independent review, rolls the unreviewed item back from its backup |
+
+### Surviving a restart
+
+Because the driver runs **inside** your opencode process, restarting opencode kills it — and over a run
+that lasts hours or days that is an ordinary event, not an exception. A killed driver cannot finish its
+batch, so items that already passed independent review can be left **uncommitted** in the working tree.
+
+`retrynow_status` detects this (state says the loop is progressing, but no loop is active in this
+process) and tells you which way to go:
+
+- An interrupted batch is still recorded → run **`retrynow_recover` first**. Restarting first is the
+  destructive path: a new life absorbs those changes into its baseline, and their provenance, evidence,
+  and review verdicts are gone permanently with no trace in history.
+- Nothing left in flight → just `retrynow_start` to resume.
+
+Recovery fails closed. Anything it cannot prove — a missing per-item backup, review signals that are not
+a contiguous prefix, a commit that appeared mid-batch, a red test/lint run afterwards, or a changed file
+it cannot attribute — is refused with the reason, leaving the repository untouched for you to inspect.
 
 Only phases whose resolved agent is `opencode` run this way. `codex` and `claude` roles still spawn
 their own CLIs (`codex exec` / `claude -p ... --bare`), the same as outside the plugin, so a mixed-agent

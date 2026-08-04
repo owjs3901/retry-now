@@ -63,10 +63,12 @@ export async function restoreRepositorySnapshot(
   if (currentHead !== snapshot.head) {
     return `Git HEAD changed from ${snapshot.head} to ${currentHead ?? '(unavailable)'}`
   }
-  const currentPaths = await gitVisiblePaths(root, git, false)
-  if (currentPaths === null) return 'current repository paths are unavailable'
+  const current = await gitVisiblePaths(root, git, false)
+  if (current.kind === 'failed') {
+    return 'current repository paths are unavailable'
+  }
   const currentEntries = new Map<string, SnapshotEntry>()
-  for (const path of currentPaths) {
+  for (const path of current.paths) {
     currentEntries.set(
       path,
       await captureSnapshotEntry(resolve(root, path), files),

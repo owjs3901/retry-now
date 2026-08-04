@@ -9,6 +9,7 @@ import { resolve } from 'node:path'
 import {
   AGENT_KINDS,
   type AgentKind,
+  type FrontendInstallResult,
   installFrontend,
   isAgentKind,
 } from '@retry-now/core'
@@ -18,6 +19,11 @@ export async function runInstall(
   agentRaw: string,
   cwd: string,
   personal: boolean,
+  install: (
+    agent: AgentKind,
+    driverBase: string,
+    options: { readonly cwd: string; readonly personal: boolean },
+  ) => Promise<FrontendInstallResult> = installFrontend,
 ): Promise<number> {
   if (!isAgentKind(agentRaw)) {
     console.error(
@@ -30,7 +36,7 @@ export async function runInstall(
 
   // Bake `bun "<cliEntry>" run` as the driver. installFrontend appends --cwd for project
   // installs and resolves the per-agent destination path + invocation syntax.
-  const r = await installFrontend(agent, `bun "${cliEntry}" run`, {
+  const r = await install(agent, `bun "${cliEntry}" run`, {
     cwd: resolve(cwd),
     personal,
   })

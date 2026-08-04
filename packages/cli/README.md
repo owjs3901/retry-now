@@ -36,6 +36,7 @@ retry-now init
 | `retry-now run` | Run the loop to a terminal state |
 | `retry-now install <agent>` | Install the `/retry-now` (or `$retry-now`) trigger for `opencode` \| `claude` \| `codex` |
 | `retry-now status` | Show the current loop state (iteration, streak, mode) |
+| `retry-now recover` | Recover a loop whose driver was killed mid-batch: commit the items that already passed independent review, roll the unreviewed item back from its backup |
 | `retry-now reset` | Reset the loop counters, keeping the config |
 | `retry-now version` | Print the version (`-v` / `--version`) |
 

@@ -175,6 +175,7 @@ retry-now install codex      # then  $retry-now   inside Codex
 | `retry-now run` | Run the loop to a terminal state |
 | `retry-now install <agent>` | Install the `/retry-now` (or `$retry-now`) trigger for `opencode` \| `claude` \| `codex` |
 | `retry-now status` | Show the current loop state (iteration, streak, mode) |
+| `retry-now recover` | Recover a loop whose driver was killed mid-batch: commit the items that already passed independent review, roll the unreviewed item back from its backup |
 | `retry-now reset` | Reset the loop counters, keeping the config |
 | `retry-now version` | Print the version (`-v` / `--version`) |
 
@@ -237,6 +238,27 @@ To make attribution provable, the selected repository/package scope must be clea
 starts when automatic commits are enabled; retry-now stops rather than mixing pre-existing work into
 an iteration commit.
 
+### Editing the config while the loop runs
+
+A 윤회 runs for hours or days, so `config.json` gets edited *during* a run — most often to raise
+`maxIterations` or retune a threshold after watching a few lives. The driver re-reads the file at
+every **life boundary** (never inside a life), so those edits land without a stop/restart.
+
+Only the loop-control counters are re-applied, because they are read at the top of a life and nowhere
+else, so changing them cannot invalidate work already done:
+
+| Field | Mid-run behaviour |
+|---|---|
+| `maxIterations`, `threshold`, `revertThreshold` | **Re-applied** at the next boundary, logged as `config reloaded: maxIterations 50 -> 100` |
+| everything else | **Pinned** for the rest of the run, logged with the reason and `Restart to apply it.` |
+
+Nothing is ever ignored silently in either direction. Fields stay pinned because they would invalidate
+something the run already committed to — `targets` decides which loops exist and owns separate state,
+`improvementBatchSize` already sized the plan and laid out per-item backup directories, the three
+intent prompts were synthesized at start, and the verify/bench commands are the gate this run's items
+were already judged against. A config that becomes unreadable or invalid mid-run is reported and the
+running values are kept: a half-saved edit never takes down a healthy long-running loop.
+
 ### Per-package split (분할 윤회)
 
 In a monorepo you can run **an independent loop per package**. Each target is scoped strictly to its own path,
@@ -256,10 +278,12 @@ so it never pollutes your repo:
 | `prompts/analyze.md`, `prompts/improve.md` | Prompts synthesized from the config on every run |
 | `state.json` | Driver-owned counters (iteration, streak, status) — **never fed back into ANALYZE** |
 | `current.json` | This life's id / phase — the only hint given to the agent |
+| `iteration.json` | Driver-owned record of the in-flight IMPROVE transaction (the HEAD it must keep immutable). Present only while a batch is running; it is what `retry-now recover` reads after a hard kill. Not agent-visible |
 | `signal.json` | One-way agent → driver signal, overwritten each phase |
 | `reports/NNNN-*.md` | Per-life analyze / improve reports |
 | `items/NNNN-<item>-<stage>-*` | Isolated current/signal/prompt artifacts for each implementation and review session |
-| `backups/NNNN/item-<id>/` | Per-item file backups — the source for IMPROVE reverts (not git) |
+| `backups/NNNN/item-<id>/` | Per-item file backups — the source for IMPROVE reverts (not git). Both stages of an item share one directory, so its contents are exactly `HEAD + item(1..K-1)`: restoring it strips item `K` alone, even when an earlier item edited the same file |
+| `backups/NNNN/item-<id>/NEW_FILES.txt` | Manifest of the paths that item **created**, one per line. Restoring pre-existing files cannot undo a file that never existed, so a rollback needs this to delete them |
 | `ledger.md`, `history.jsonl` | Human-facing log / append-only machine log |
 | `summary.md` | Comprehensive report written when the loop ends |
 | `STOP` | Create this file to stop manually at the next boundary |
@@ -317,8 +341,21 @@ and the external `opencode run "<msg>"` spawn above remains exactly what the CLI
   (for example `.env`, caches, and generated output) are outside this guarantee and should be protected separately.
 - **Unexpected commits are quarantined, never reset automatically** — if an agent changes `HEAD`, retry-now stops
   and blocks reruns until the expected revision is restored or `retry-now reset` explicitly accepts the current state.
-- **Interrupted batches roll back as one iteration** — if a later item crashes or exhausts quota, earlier reviewed
-  items from that unfinished batch are also restored so no unrecorded partial progress can be silently adopted.
+- **Interrupted batches roll back as one iteration** — if a later item crashes or exhausts quota *while the driver is
+  still alive*, earlier reviewed items from that unfinished batch are also restored so no unrecorded partial progress
+  can be silently adopted.
+- **A killed driver survives a host restart** — a 윤회 runs for hours or days, so an editor/host restart is an ordinary
+  event, not an exception. A driver that stops for any reason of its own releases its lock, so a `driver.lock` still
+  present at startup proves the previous driver was killed. The next run transitions that run's `status: running` (a
+  claim no reader could otherwise detect as stale) to **`interrupted`**, reports any uncommitted residue, and points at
+  `retry-now recover`. `interrupted` is recoverable, not terminal — a rerun resumes from it.
+- **`retry-now recover` reconstructs a killed batch instead of losing it** — it recovers each item's final verdict from
+  its own review signal, rolls the first **unreviewed** item back from its per-item backup (it never passed the review
+  gate, so discipline says it must not survive), re-runs the configured test/lint on the resulting tree, proves commit
+  attribution, and then commits only the reviewed-kept prefix as `retry-now#NNNN: … (K/N applied)` with the recovery
+  recorded in the body. Every step fails closed: anything it cannot prove is refused with an explanation and the
+  repository is left for a human. It commits reviewed work rather than discarding it because a commit is reversible
+  with `git reset`, while a rollback destroys evidence permanently.
 - **The loop is safe to run unattended** — `maxIterations` caps it, the `STOP` sentinel stops it cleanly, and
   commit-signing trouble falls back to `--no-gpg-sign` so a commit prompt can never wedge the loop.
 

@@ -5,6 +5,7 @@
  *   retry-now init            interactive setup UI (collects 3 prompts + threshold)
  *   retry-now run [--dry-run] run the reincarnation loop to convergence
  *   retry-now status          show current loop state
+ *   retry-now recover         recover a loop whose driver was killed mid-batch
  *   retry-now reset           reset the loop counter (keeps config)
  *
  * Cross-agent: the same loop drives opencode / codex / claude code per `.retry-now/config.json`.
@@ -17,14 +18,19 @@ import {
   AGENT_LABEL,
   agentForRole,
   BANNER,
+  createCommandRunner,
   DEFAULT_REVERT_THRESHOLD,
   DEFAULT_THRESHOLD,
+  isPidAlive,
   loadConfig,
   type LoopState,
   modelForRole,
+  readDriverLock,
+  recoverProject,
   resolvePaths,
   runLoop,
   slugifyTarget,
+  spawnVerifyCommand,
   variantForRole,
   VERSION,
 } from '@retry-now/core'
@@ -35,7 +41,7 @@ import { runInstall } from './install.ts'
 /** Absolute path to this CLI entry; baked into installed trigger files as the driver. */
 const CLI_ENTRY = fileURLToPath(import.meta.url)
 
-interface ParsedArgs {
+export interface ParsedArgs {
   readonly command: string
   /** second positional, e.g. the agent for `install <agent>` */
   readonly target: string
@@ -49,7 +55,7 @@ interface ParsedArgs {
   readonly personal: boolean
 }
 
-function parseArgs(argv: readonly string[]): ParsedArgs {
+export function parseArgs(argv: readonly string[]): ParsedArgs {
   let command = ''
   let target = ''
   let cwd = process.cwd()
@@ -94,6 +100,7 @@ usage:
   retry-now run [옵션]           윤회 실행 (수렴할 때까지)
   retry-now install <agent>      /retry-now 트리거 설치 (opencode | claude | codex)
   retry-now status               현재 윤회 상태 보기
+  retry-now recover              중단된 윤회 복구 (리뷰 통과분 커밋 + 미리뷰 아이템 롤백)
   retry-now reset                윤회 카운터 리셋 (config 유지)
   retry-now version              현재 버전 출력 (-v | --version)
 
@@ -111,7 +118,7 @@ agents:
   claude   → .claude/commands/retry-now.md     (호출: /retry-now)
   codex    → .agents/skills/retry-now/SKILL.md  (호출: $retry-now)`
 
-async function exists(path: string): Promise<boolean> {
+export async function exists(path: string): Promise<boolean> {
   try {
     await access(path)
     return true
@@ -120,31 +127,46 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function cmdRun(
+export type RunDependencies = {
+  readonly loadConfig: typeof loadConfig
+  readonly runInit: typeof runInit
+  readonly runLoop: typeof runLoop
+  readonly stdinIsTTY: boolean
+}
+
+const RUN_DEPENDENCIES: RunDependencies = {
+  loadConfig,
+  runInit,
+  runLoop,
+  stdinIsTTY: process.stdin.isTTY,
+}
+
+export async function cmdRun(
   cwd: string,
   dryRun: boolean,
   commitOverride: boolean | undefined,
   waitForQuotaOverride: boolean | undefined,
+  dependencies: RunDependencies = RUN_DEPENDENCIES,
 ): Promise<number> {
-  let loaded = await loadConfig(cwd)
+  let loaded = await dependencies.loadConfig(cwd)
   if (!loaded) {
     // No config yet → run the interactive setup first (terminal only). In a non-TTY context
     // (e.g. spawned by an agent) the agent's /retry-now command writes the config beforehand.
-    if (!process.stdin.isTTY) {
+    if (!dependencies.stdinIsTTY) {
       console.error('설정이 없다. 먼저 `retry-now init` 을 실행하라.')
       return 1
     }
     console.log('설정이 없다 — 먼저 설정을 진행한다.')
-    const code = await runInit(cwd)
+    const code = await dependencies.runInit(cwd)
     if (code !== 0) return code
-    loaded = await loadConfig(cwd)
+    loaded = await dependencies.loadConfig(cwd)
     if (!loaded) return 1
   }
   const config =
     commitOverride === undefined
       ? loaded
       : { ...loaded, commitPerIteration: commitOverride }
-  const result = await runLoop(config, {
+  const result = await dependencies.runLoop(config, {
     cwd,
     dryRun,
     waitForQuota: waitForQuotaOverride ?? config.waitForQuota,
@@ -152,7 +174,7 @@ async function cmdRun(
   return result.status === 'error' ? 1 : 0
 }
 
-async function readState(path: string): Promise<LoopState | null> {
+export async function readState(path: string): Promise<LoopState | null> {
   if (!(await exists(path))) return null
   try {
     return JSON.parse(await readFile(path, 'utf8')) as LoopState
@@ -161,12 +183,36 @@ async function readState(path: string): Promise<LoopState | null> {
   }
 }
 
-function describeState(state: LoopState | null, threshold: number): string {
-  if (!state) return '(아직 실행된 적 없음)'
-  return `${state.status}  iter=${state.iteration}  streak=${state.noImprovementStreak}/${threshold}`
+export interface StateView {
+  /** an IMPROVE transaction is still recorded as in flight, so a killed batch needs recovering */
+  readonly pendingTransaction: boolean
+  /** no LIVE driver holds the project lock */
+  readonly driverKilled: boolean
 }
 
-async function cmdStatus(cwd: string): Promise<number> {
+export function describeState(
+  state: LoopState | null,
+  threshold: number,
+  view: StateView,
+): string {
+  if (!state) return '(아직 실행된 적 없음)'
+  const base = `${state.status}  iter=${state.iteration}  streak=${state.noImprovementStreak}/${threshold}`
+  // Two shapes mean "a driver was killed without recording a terminal status": an explicit
+  // `interrupted` (a later driver startup already corrected it), or a `running` claim with no live
+  // driver behind it — which is a LIE no reader could otherwise detect. Either way there may be
+  // reviewed-but-uncommitted work in the tree, so it must never read as an ordinary state.
+  const stale =
+    state.status === 'interrupted' ||
+    (state.status === 'running' && view.driverKilled)
+  if (!stale) return base
+  // Only point at `recover` while an in-flight transaction record proves work is pending; otherwise
+  // the interruption is already resolved and the advice would be stale.
+  return view.pendingTransaction
+    ? `${base}  ⚠ 드라이버가 비정상 종료됨 — \`retry-now recover\` 로 복구하세요 (먼저 복구하지 않고 재개하면 리뷰를 통과한 미커밋 작업이 사라집니다)`
+    : `${base}  (복구할 중단 배치 없음 — \`retry-now run\` 으로 이어서 진행)`
+}
+
+export async function cmdStatus(cwd: string): Promise<number> {
   const config = await loadConfig(cwd)
   if (!config) {
     console.error('설정이 없다. 먼저 `retry-now init` 을 실행하라.')
@@ -198,10 +244,27 @@ async function cmdStatus(cwd: string): Promise<number> {
       'HEAD       : unauthorized commit 격리 중 (HEAD 복원 또는 retry-now reset 필요)',
     )
 
+  // A driver that stops for any reason of its own releases its lock, so no live holder means the
+  // previous driver is gone — whatever `state.json` still claims.
+  const holder = await readDriverLock(paths.driverLock)
+  const driverKilled = holder === null || !isPidAlive(holder.pid)
+  if (holder !== null) {
+    console.log(
+      `driver     : pid ${holder.pid} ${driverKilled ? '죽음 (stale lock)' : '실행 중'} · 시작 ${holder.startedAt}`,
+    )
+  }
+
   if (config.targets.length === 0) {
     console.log('mode       : 전체 레포 단일 윤회')
     console.log(
-      `state      : ${describeState(await readState(paths.state), config.threshold)}`,
+      `state      : ${describeState(
+        await readState(paths.state),
+        config.threshold,
+        {
+          pendingTransaction: await exists(paths.iterationRecord),
+          driverKilled,
+        },
+      )}`,
     )
     return 0
   }
@@ -210,13 +273,50 @@ async function cmdStatus(cwd: string): Promise<number> {
   for (const target of config.targets) {
     const tp = resolvePaths(cwd, slugifyTarget(target))
     console.log(
-      `  ◆ ${target}: ${describeState(await readState(tp.state), config.threshold)}`,
+      `  ◆ ${target}: ${describeState(
+        await readState(tp.state),
+        config.threshold,
+        {
+          pendingTransaction: await exists(tp.iterationRecord),
+          driverKilled,
+        },
+      )}`,
     )
   }
   return 0
 }
 
-async function cmdReset(cwd: string): Promise<number> {
+/**
+ * `retry-now recover` — reconstruct a life whose driver was killed mid-batch.
+ *
+ * A host/editor restart during a multi-hour 윤회 leaves reviewed-but-uncommitted items in the working
+ * tree and a `state.json` still claiming `running`. Without this, starting the next life absorbs those
+ * changes into a fresh baseline and their provenance, evidence, and review verdict are lost for good.
+ */
+export async function cmdRecover(
+  cwd: string,
+  recover: typeof recoverProject = recoverProject,
+): Promise<number> {
+  console.log(BANNER)
+  const { reports, code } = await recover(cwd, {
+    commandRunner: createCommandRunner(spawnVerifyCommand),
+  })
+  for (const report of reports) {
+    for (const line of report.lines) console.log(line)
+  }
+  const recovered = reports.filter((report) => report.status === 'recovered')
+  if (recovered.length > 0) {
+    const kept = recovered.reduce((sum, r) => sum + r.keptCount, 0)
+    const rolled = recovered.flatMap((r) => r.rolledBack)
+    console.log('')
+    console.log(
+      `복구 완료: 리뷰 통과 ${kept}건 보존${rolled.length > 0 ? `, 미리뷰 item ${rolled.join(', ')} 롤백` : ''}. 이어서 \`retry-now run\`.`,
+    )
+  }
+  return code
+}
+
+export async function cmdReset(cwd: string): Promise<number> {
   const paths = resolvePaths(cwd)
   if (!(await exists(paths.config))) {
     console.error('설정이 없다. 먼저 `retry-now init` 을 실행하라.')
@@ -234,16 +334,23 @@ async function cmdReset(cwd: string): Promise<number> {
     startedAt: now,
     updatedAt: now,
   }
-  const statePaths =
+  const statePathsFor =
     cfg && cfg.targets.length > 0
-      ? cfg.targets.map(
-          (target) => resolvePaths(cwd, slugifyTarget(target)).state,
-        )
-      : [paths.state]
+      ? cfg.targets.map((target) => resolvePaths(cwd, slugifyTarget(target)))
+      : [paths]
   await Promise.all(
-    statePaths.map(async (statePath) => {
-      await mkdir(dirname(statePath), { recursive: true })
-      await writeFile(statePath, `${JSON.stringify(fresh, null, 2)}\n`, 'utf8')
+    statePathsFor.map(async (target) => {
+      await mkdir(dirname(target.state), { recursive: true })
+      await writeFile(
+        target.state,
+        `${JSON.stringify(fresh, null, 2)}\n`,
+        'utf8',
+      )
+      // Reset means "this project has no history to continue from". An in-flight IMPROVE
+      // transaction record is exactly such history: left behind, it describes a life number the
+      // fresh counter will never reach, so `retry-now recover` would reason about a batch that no
+      // longer exists. Cleared per target, because each one owns its own record.
+      await rm(target.iterationRecord, { force: true })
     }),
   )
   if (await exists(paths.stop)) await rm(paths.stop)
@@ -252,8 +359,28 @@ async function cmdReset(cwd: string): Promise<number> {
   return 0
 }
 
-async function main(): Promise<number> {
-  const rawArgs = process.argv.slice(2)
+export type CliCommands = {
+  readonly init: typeof runInit
+  readonly run: typeof cmdRun
+  readonly install: typeof runInstall
+  readonly status: typeof cmdStatus
+  readonly recover: typeof cmdRecover
+  readonly reset: typeof cmdReset
+}
+
+const CLI_COMMANDS: CliCommands = {
+  init: runInit,
+  run: cmdRun,
+  install: runInstall,
+  status: cmdStatus,
+  recover: cmdRecover,
+  reset: cmdReset,
+}
+
+export async function main(
+  rawArgs: readonly string[] = process.argv.slice(2),
+  commands: CliCommands = CLI_COMMANDS,
+): Promise<number> {
   if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
     console.log(`retry-now v${VERSION}`)
     return 0
@@ -272,15 +399,17 @@ async function main(): Promise<number> {
       console.log(`retry-now v${VERSION}`)
       return 0
     case 'init':
-      return runInit(cwd)
+      return commands.init(cwd)
     case 'run':
-      return cmdRun(cwd, dryRun, commitOverride, waitForQuotaOverride)
+      return commands.run(cwd, dryRun, commitOverride, waitForQuotaOverride)
     case 'install':
-      return runInstall(CLI_ENTRY, target, cwd, personal)
+      return commands.install(CLI_ENTRY, target, cwd, personal)
     case 'status':
-      return cmdStatus(cwd)
+      return commands.status(cwd)
+    case 'recover':
+      return commands.recover(cwd)
     case 'reset':
-      return cmdReset(cwd)
+      return commands.reset(cwd)
     case '':
     case 'help':
       console.log(USAGE)
@@ -292,11 +421,19 @@ async function main(): Promise<number> {
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
+export async function runCliEntry(
+  run: () => Promise<number> = main,
+  exit: (code: number) => void = process.exit,
+): Promise<void> {
+  try {
+    exit(await run())
+  } catch (err) {
     console.error(
       err instanceof Error ? (err.stack ?? err.message) : String(err),
     )
-    process.exit(1)
-  })
+    exit(1)
+  }
+}
+
+const moduleMetadata = import.meta
+if (moduleMetadata.main) void runCliEntry()

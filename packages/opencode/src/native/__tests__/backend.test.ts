@@ -125,6 +125,29 @@ test('the public plugin client type is structurally assignable to the native sea
   expect(typeof narrowRealClient).toBe('function')
 })
 
+test('returns a retryable exit when child session creation returns an SDK error', async () => {
+  await withBackend(async ({ client, backend, logPath }) => {
+    // Given
+    const lines: string[] = []
+    client.createResult = {
+      data: undefined,
+      error: { name: 'ProviderError', data: { message: 'service offline' } },
+    }
+
+    // When
+    const result = await backend.run(
+      request(logPath, { log: (line) => lines.push(line) }),
+    )
+
+    // Then
+    expect(result).toEqual({ kind: 'exit', code: 1 })
+    expect(lines).toEqual([
+      '  ! opencode 자식 세션 생성 실패: ProviderError: service offline',
+    ])
+    expect(client.promptCalls).toHaveLength(0)
+  })
+})
+
 test('creates a context-zero child and prompts only that new session', async () => {
   await withBackend(async ({ client, backend, logPath }) => {
     // Given
@@ -300,6 +323,24 @@ test('aborts a hung child at the phase timeout and returns a retryable exit', as
     const result = await backend.run(request(logPath, { timeoutMs: 5 }))
 
     // Then
+    expect(result).toEqual({ kind: 'exit', code: 1 })
+    expect(client.abortCalls).toEqual([
+      { path: { id: 'child-1' }, query: { directory } },
+    ])
+  })
+})
+
+test('a rejected prompt remains governed by the phase deadline and is contained', async () => {
+  await withBackend(async ({ client, backend, logPath }) => {
+    // Given an SDK transport rejection before any terminal signal exists.
+    client.promptImplementation = async () => {
+      throw new Error('headers timeout')
+    }
+
+    // When
+    const result = await backend.run(request(logPath, { timeoutMs: 5 }))
+
+    // Then the rejection itself does not escape, and the deadline aborts the child.
     expect(result).toEqual({ kind: 'exit', code: 1 })
     expect(client.abortCalls).toEqual([
       { path: { id: 'child-1' }, query: { directory } },

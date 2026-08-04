@@ -12,7 +12,13 @@ import {
   statusPaths,
 } from '../git.ts'
 import { validateImproveSignal } from '../improve-signal.ts'
-import { converged, oathBlock, rebirth, revertConverged } from '../theme.ts'
+import {
+  converged,
+  oathBlock,
+  rebirth,
+  revertConverged,
+  snapshotFailure,
+} from '../theme.ts'
 import type { PlannedImprovement, Signal } from '../types.ts'
 
 function signal(overrides: Partial<Signal>): Signal {
@@ -183,4 +189,22 @@ test('theme renders every user-facing lifecycle message', () => {
   expect(converged(5)).toContain('5생 연속')
   expect(revertConverged(2)).toContain('2생 연속')
   expect(oathBlock()).toContain('운명이여, 무릎 꿇어라')
+})
+
+test('theme names the measured cause of every snapshot failure', () => {
+  // A guessed cause ("충돌 상태 또는 서브모듈") once sent a user hunting for conflicts and submodules
+  // that did not exist, so each reason must state what was actually measured — and the two that know
+  // an offending path must print it.
+  expect(
+    snapshotFailure({ reason: 'gitlink', path: 'vendor/dependency' }),
+  ).toContain('vendor/dependency')
+  expect(
+    snapshotFailure({
+      reason: 'unsafe-path',
+      path: 'app/docs/[...name]/page.tsx',
+    }),
+  ).toContain('app/docs/[...name]/page.tsx')
+  expect(snapshotFailure({ reason: 'head-moved' })).toContain('HEAD')
+  expect(snapshotFailure({ reason: 'index-moved' })).toContain('인덱스')
+  expect(snapshotFailure({ reason: 'git-failed' })).toContain('Git 명령')
 })

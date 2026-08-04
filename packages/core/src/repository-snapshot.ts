@@ -1,6 +1,9 @@
 export {
   captureRepositorySnapshot,
+  captureRepositorySnapshotResult,
   type RepositorySnapshot,
+  type SnapshotCapture,
+  type SnapshotFailure,
 } from './worktree-snapshot-capture.ts'
 export {
   repositoryDelta,

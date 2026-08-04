@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test'
 
-import { retryNowCommandSessionID } from '../plugin-events.ts'
+import {
+  isSessionIdleEvent,
+  retryNowCommandSessionID,
+} from '../plugin-events.ts'
 
 test('returns the sessionID for a retry-now command.executed event', () => {
   // Given / When / Then
@@ -50,4 +53,10 @@ test('honours a custom command name', () => {
       'retry-now-custom',
     ),
   ).toBe('ses_z')
+})
+
+test('recognises only session.idle event records', () => {
+  expect(isSessionIdleEvent({ type: 'session.idle' })).toBe(true)
+  expect(isSessionIdleEvent({ type: 'session.status' })).toBe(false)
+  expect(isSessionIdleEvent(undefined)).toBe(false)
 })

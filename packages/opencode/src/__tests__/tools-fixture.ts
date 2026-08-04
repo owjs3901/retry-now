@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import {
   type DriverOptions,
   type DriverResult,
+  type RecoverReport,
   resolvePaths,
   type RetryNowConfig,
 } from '@retry-now/core'
@@ -70,25 +71,39 @@ export async function withFixture(
     readonly controller: LoopController
     readonly runtime: RetryNowToolRuntime
     readonly calls: DriverOptions[]
+    /** roots passed to the injected `recoverProject`, so the tool's wiring is observable */
+    readonly recoverCalls: string[]
     setRunResult(result: Promise<DriverResult>): void
+    setRecoverResult(reports: readonly RecoverReport[], code: number): void
   }) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'retry-now-tools-'))
   const client = new FakeNativeClient()
   const controller = new LoopController(client)
   const calls: DriverOptions[] = []
+  const recoverCalls: string[] = []
   let runResult = Promise.resolve<DriverResult>({
     status: 'stopped-converged',
     iterations: 1,
     finalStreak: 5,
     threshold: 5,
   })
+  let recoverResult: {
+    readonly reports: readonly RecoverReport[]
+    readonly code: number
+  } = { reports: [], code: 0 }
   const runtime = new RetryNowToolRuntime({
     client,
     controller,
     runLoop: async (_config: RetryNowConfig, options: DriverOptions) => {
       calls.push(options)
       return runResult
+    },
+    // Injected so the tool's wiring is testable without running real git or the project's own
+    // test/lint; `recover.test.ts` covers the recovery behaviour itself against a real repository.
+    recoverProject: (directory) => {
+      recoverCalls.push(directory)
+      return Promise.resolve(recoverResult)
     },
   })
   try {
@@ -98,8 +113,12 @@ export async function withFixture(
       controller,
       runtime,
       calls,
+      recoverCalls,
       setRunResult(result): void {
         runResult = result
+      },
+      setRecoverResult(reports, code): void {
+        recoverResult = { reports, code }
       },
     })
   } finally {

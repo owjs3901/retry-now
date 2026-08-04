@@ -55,8 +55,26 @@ export const runGit: GitRunner = (args, cwd) =>
     })
   })
 
-/** True only for a bounded, literal, repository-relative file path. */
-export function isSafeRepoFilePath(file: string): boolean {
+/**
+ * True only for a bounded, contained, repository-relative file path.
+ *
+ * This is the CONTAINMENT guard every repository path must clear: a length cap, no control or
+ * bidirectional-override characters, no `.`/`..`/empty segment, no leading `/`, no `C:` drive-letter
+ * prefix, no leading `:` (Git's pathspec-magic prefix), and no trailing `/`. Together they prove the
+ * path can only ever name something inside this repository.
+ *
+ * It deliberately PERMITS the glob metacharacters `* ? [ ] { }`, because a file literally named
+ * `app/blog/[slug]/page.tsx` is ordinary tracked content in any Next.js / SvelteKit / Remix
+ * repository, and in a filename those bytes are literal: every Git invocation here passes paths as
+ * `:(literal)` pathspecs, which disables pathspec magic outright, and a snapshot path is only ever
+ * `resolve()`d for direct filesystem access. Rejecting them made the loop unusable on those
+ * repositories — one `[...name]/` directory nulled the entire snapshot.
+ *
+ * Use this for a path that names REAL repository content: Git's own `ls-files` / `status` output,
+ * the files an iteration changed, and the paths recovered from an item's on-disk backup. Use
+ * `isSafeRepoFilePath` for a path accepted purely on an agent's word.
+ */
+export function isSafeGitListedPath(file: string): boolean {
   if (
     file === '' ||
     file.length > SIGNAL_LIMITS.filePath ||
@@ -70,13 +88,29 @@ export function isSafeRepoFilePath(file: string): boolean {
     normalized.startsWith('/') ||
     normalized.endsWith('/') ||
     /^[a-zA-Z]:/.test(normalized) ||
-    normalized.startsWith(':') ||
-    ['*', '?', '[', ']', '{', '}'].some((token) => normalized.includes(token))
+    normalized.startsWith(':')
   ) {
     return false
   }
   const parts = normalized.split('/')
   return parts.every((part) => part !== '' && part !== '.' && part !== '..')
+}
+
+/**
+ * Glob metacharacters. Backslash normalization cannot create or destroy any of them, so they are
+ * matched against the raw string.
+ */
+const GLOB_METACHARACTERS = ['*', '?', '[', ']', '{', '}'] as const
+
+/**
+ * `isSafeGitListedPath` plus a rejection of glob metacharacters — the STRICT guard, reserved for a
+ * path that arrives as uncorroborated agent-authored text (see `cleanPlanned` in `signal.ts`).
+ */
+export function isSafeRepoFilePath(file: string): boolean {
+  return (
+    isSafeGitListedPath(file) &&
+    !GLOB_METACHARACTERS.some((token) => file.includes(token))
+  )
 }
 
 function literalPathspec(file: string): string {
@@ -214,7 +248,11 @@ export async function commitPaths(
     return { code: -1, stdout: '', stderr: 'no files supplied for commit' }
   }
   for (const file of files) {
-    if (!isSafeRepoFilePath(file)) {
+    // Containment only: these are the files an iteration actually changed, each already proven to be
+    // an exact `git status -z` path by `validateCommitFileAttribution`, and each passed to Git below
+    // as a `:(literal)` pathspec that disables pathspec magic. A tracked
+    // `app/blog/[slug]/page.tsx` must therefore commit like any other file.
+    if (!isSafeGitListedPath(file)) {
       return {
         code: -1,
         stdout: '',

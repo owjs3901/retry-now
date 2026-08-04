@@ -11,10 +11,11 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
-import { writeJson } from '../io.ts'
+import { exists, writeJson } from '../io.ts'
 import { resolvePaths } from '../paths.ts'
 import {
   loadState,
+  markInterruptedState,
   recordImproveOutcome,
   recordNoImprovement,
   recordRevert,
@@ -180,4 +181,38 @@ test('recordImproveOutcome: a kept batch in between resets the revert climb to z
   expect(s.revertStreak).toBe(0)
   expect(recordImproveOutcome(s, 0)).toBe(false) // climbs again from 1, not 3
   expect(s.revertStreak).toBe(1)
+})
+
+/**
+ * `status: running` beside a DEAD driver pid is a lie no reader can detect, and it is exactly what
+ * two real host-restart incidents left behind while reviewed-but-uncommitted work sat in the tree.
+ */
+test('markInterruptedState: turns a stale running claim into interrupted', async () => {
+  const paths = resolvePaths(dir)
+  await writeJson(paths.state, freshState({ status: 'running', iteration: 43 }))
+  const marked = await markInterruptedState(paths, 5, 3)
+  expect(marked?.status).toBe('interrupted')
+  expect(marked?.iteration).toBe(43)
+  expect((await loadState(paths, 5, 3)).status).toBe('interrupted')
+})
+
+test('markInterruptedState: interrupted is RECOVERABLE, not a stopped status', async () => {
+  const paths = resolvePaths(dir)
+  await writeJson(paths.state, freshState({ status: 'running', iteration: 2 }))
+  const marked = await markInterruptedState(paths, 5, 3)
+  // The driver refuses to resume any `stopped-*` status; `interrupted` must not match that gate.
+  expect(marked?.status.startsWith('stopped')).toBe(false)
+})
+
+test('markInterruptedState: leaves an already-terminal status alone', async () => {
+  const paths = resolvePaths(dir)
+  await writeJson(paths.state, freshState({ status: 'paused-quota' }))
+  expect(await markInterruptedState(paths, 5, 3)).toBeNull()
+  expect((await loadState(paths, 5, 3)).status).toBe('paused-quota')
+})
+
+test('markInterruptedState: never CREATES state for a target that never ran', async () => {
+  const paths = resolvePaths(dir, 'never-ran')
+  expect(await markInterruptedState(paths, 5, 3)).toBeNull()
+  expect(await exists(paths.state)).toBe(false)
 })

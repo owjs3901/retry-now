@@ -9,11 +9,19 @@
  */
 import { runDriverCli } from '@retry-now/core'
 
-runDriverCli(process.argv)
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error(
-      err instanceof Error ? (err.stack ?? err.message) : String(err),
+export async function runDriverEntry(
+  argv: readonly string[],
+  runner: (args: readonly string[]) => Promise<number> = runDriverCli,
+  logError: (line: string) => void = console.error,
+): Promise<number> {
+  try {
+    return await runner(argv)
+  } catch (error) {
+    logError(
+      error instanceof Error ? (error.stack ?? error.message) : String(error),
     )
-    process.exit(1)
-  })
+    return 1
+  }
+}
+
+if (import.meta.main) process.exit(await runDriverEntry(process.argv))

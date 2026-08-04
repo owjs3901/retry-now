@@ -7,6 +7,7 @@
  */
 
 import type { AgentBackend } from './agent-backend.ts'
+import type { GitRunner } from './git.ts'
 
 /** Which headless coding agent the driver spawns each reincarnation. */
 export type AgentKind = 'opencode' | 'codex' | 'claude'
@@ -165,6 +166,14 @@ export type LoopStatus =
   | 'stopped-maxiter' // safety cap hit
   | 'paused-quota' // every account out of quota (429/rate-limit) — re-run when it refills
   | 'error' // agent failed to signal twice
+  /**
+   * The driver process died without reaching any terminal status — a host/editor restart, a hard
+   * kill, or an OS crash. `running` beside a dead pid is a LIE the next reader cannot detect, so
+   * the next driver startup transitions it here (see `markInterruptedState`). This status is
+   * RECOVERABLE, not terminal: it does not start with `stopped`, so a rerun resumes from it, and
+   * it never silently absorbs the dead run's uncommitted work into a new baseline.
+   */
+  | 'interrupted'
 
 /**
  * Driver-owned control state. The driver is the SOLE owner of the cross-reincarnation
@@ -300,6 +309,13 @@ export interface DriverOptions {
   readonly backend?: AgentBackend
   /** baseline-preflight command runner; defaults to a real shell spawn */
   readonly commandRunner?: CommandRunner
+  /**
+   * Git invoker for the driver's OWN queries (status, HEAD, snapshot, commit); defaults to spawning
+   * real `git`. Injected for the same reason `commandRunner` is: the driver's most important refusals
+   * are the ones it makes when Git cannot answer, and those are unreachable against a healthy
+   * repository. Never used to fake Git semantics — only to make a specific invocation fail.
+   */
+  readonly git?: GitRunner
   /** optional progress sink; defaults to console */
   readonly log?: (line: string) => void
 }

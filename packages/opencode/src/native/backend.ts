@@ -156,14 +156,11 @@ export class OpencodeNativeBackend implements AgentBackend {
     // phase log file — a native session error is otherwise invisible (its detail lives only in the
     // child's opencode session, not this log).
     let failureDetail: string | undefined
-    let resolveDone: (value: PhaseRunResult) => void = () => undefined
-    const done = new Promise<PhaseRunResult>((resolve) => {
-      resolveDone = resolve
-    })
+    const done = Promise.withResolvers<PhaseRunResult>()
     const finish = (value: PhaseRunResult): void => {
       if (settled) return
       settled = true
-      resolveDone(value)
+      done.resolve(value)
     }
     const hasSignal = async (): Promise<boolean> => {
       if (probe === undefined) return false
@@ -299,7 +296,7 @@ export class OpencodeNativeBackend implements AgentBackend {
 
     let result: PhaseRunResult
     try {
-      result = await done
+      result = await done.promise
     } finally {
       clearTimeout(timeout)
       if (poll !== undefined) clearInterval(poll)

@@ -11,6 +11,7 @@ import {
   gitIndexPath,
   gitVisiblePaths,
   indexTree,
+  type VisiblePathsFailure,
 } from './worktree-snapshot-git.ts'
 
 export type RepositorySnapshot = {
@@ -20,19 +21,37 @@ export type RepositorySnapshot = {
   readonly entries: ReadonlyMap<string, SnapshotEntry>
 }
 
-export async function captureRepositorySnapshot(
+/**
+ * Why the transaction boundary could not be captured. The driver refuses to start ANALYZE without a
+ * snapshot, so this reason is the ONLY thing it can tell the user about a repository it just
+ * declared unusable — it must therefore be the real cause, not a guess.
+ */
+export type SnapshotFailure =
+  | VisiblePathsFailure
+  | { readonly reason: 'head-moved' }
+  | { readonly reason: 'index-moved' }
+
+export type SnapshotCapture =
+  | { readonly kind: 'snapshot'; readonly snapshot: RepositorySnapshot }
+  | { readonly kind: 'failed'; readonly failure: SnapshotFailure }
+
+export async function captureRepositorySnapshotResult(
   root: string,
   git: GitRunner = runGit,
   files: SnapshotFiles = DEFAULT_SNAPSHOT_FILES,
-): Promise<RepositorySnapshot | null> {
+): Promise<SnapshotCapture> {
   const head = await headRevision(root, git)
   const index = await indexTree(root, git)
   const indexPath = await gitIndexPath(root, git)
-  const paths = await gitVisiblePaths(root, git, true)
-  if (head === null || index === null || indexPath === null || paths === null)
-    return null
+  const visible = await gitVisiblePaths(root, git, true)
+  if (head === null || index === null || indexPath === null) {
+    return { kind: 'failed', failure: { reason: 'git-failed' } }
+  }
+  if (visible.kind === 'failed') {
+    return { kind: 'failed', failure: visible.failure }
+  }
   const entries = new Map<string, SnapshotEntry>()
-  for (const path of paths) {
+  for (const path of visible.paths) {
     entries.set(path, await captureSnapshotEntry(resolve(root, path), files))
   }
 
@@ -45,8 +64,28 @@ export async function captureRepositorySnapshot(
   const finalHead = await headRevision(root, git)
   const indexFile = await files.readFile(indexPath)
   const finalIndex = await indexTree(root, git)
-  if (finalHead !== head || finalIndex !== index) {
-    return null
+  if (finalHead !== head) {
+    return { kind: 'failed', failure: { reason: 'head-moved' } }
   }
-  return { head, indexTree: index, indexFile, entries }
+  if (finalIndex !== index) {
+    return { kind: 'failed', failure: { reason: 'index-moved' } }
+  }
+  return {
+    kind: 'snapshot',
+    snapshot: { head, indexTree: index, indexFile, entries },
+  }
+}
+
+/**
+ * `captureRepositorySnapshotResult` for the callers that only need to know WHETHER the boundary
+ * exists — restoration verification and the per-item guards, which already report their own
+ * diagnostic and cannot act on the reason.
+ */
+export async function captureRepositorySnapshot(
+  root: string,
+  git: GitRunner = runGit,
+  files: SnapshotFiles = DEFAULT_SNAPSHOT_FILES,
+): Promise<RepositorySnapshot | null> {
+  const capture = await captureRepositorySnapshotResult(root, git, files)
+  return capture.kind === 'snapshot' ? capture.snapshot : null
 }

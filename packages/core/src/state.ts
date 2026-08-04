@@ -47,6 +47,36 @@ export async function saveState(paths: Paths, state: LoopState): Promise<void> {
   await writeJson(paths.state, state)
 }
 
+/**
+ * Turn a stale `running` claim into an honest `interrupted`.
+ *
+ * A driver that reaches any terminal status writes it before exiting, so `status: running` beside a
+ * dead pid is a LIE — and it is an undetectable one for anything that only reads `state.json`. That
+ * combination was observed after a host restart killed an in-process driver mid-batch, while
+ * reviewed-but-uncommitted work sat in the working tree waiting to be silently absorbed into the
+ * next life's baseline.
+ *
+ * Returns the transitioned state, or null when there was nothing to correct: no state file (a target
+ * that never ran — never CREATE one here, unlike `loadState`), or a status that was already terminal
+ * and therefore already honest. `interrupted` is deliberately not a `stopped-*` status, so a rerun
+ * still resumes from it.
+ */
+export async function markInterruptedState(
+  paths: Paths,
+  threshold: number,
+  revertThreshold: number,
+): Promise<LoopState | null> {
+  const existing = await readJson<Partial<LoopState>>(paths.state)
+  if (existing === null || typeof existing.iteration !== 'number') return null
+  if ((existing.status ?? 'running') !== 'running') return null
+  // Safe to reuse loadState: the file is proven to exist and carry an iteration, so this normalises
+  // the record rather than creating one.
+  const state = await loadState(paths, threshold, revertThreshold)
+  state.status = 'interrupted'
+  await saveState(paths, state)
+  return state
+}
+
 /** ANALYZE said no improvements: bump streak. Returns whether we have now converged. */
 export function recordNoImprovement(state: LoopState): boolean {
   state.noImprovementStreak += 1
