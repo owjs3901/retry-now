@@ -147,11 +147,12 @@ test('installs a project frontend into a newly created command directory', async
   }
 })
 
+// `homedir()` reads a DIFFERENT environment variable per platform (`HOME` on POSIX, `USERPROFILE` on
+// Windows), so overriding one of them redirects the personal install on that platform only and writes
+// into the runner's REAL home everywhere else. The install takes an explicit `home` for exactly this.
 test('keeps identical content when installing a personal frontend', async () => {
   // Given
   const homeRoot = await mkdtemp(join(tmpdir(), 'retry-now-home-'))
-  const previousUserProfile = process.env.USERPROFILE
-  process.env.USERPROFILE = homeRoot
   const expectedDest = join(homeRoot, '.config/opencode/command/retry-now.md')
   const expectedContent = frontends.buildFrontend('opencode', DRIVER).content
   await mkdir(dirname(expectedDest), { recursive: true })
@@ -162,6 +163,7 @@ test('keeps identical content when installing a personal frontend', async () => 
     const result = await frontends.installFrontend('opencode', DRIVER, {
       cwd: join(homeRoot, 'unrelated-project'),
       personal: true,
+      home: homeRoot,
     })
 
     // Then
@@ -173,11 +175,6 @@ test('keeps identical content when installing a personal frontend', async () => 
     expect(await readFile(expectedDest, 'utf8')).toBe(expectedContent)
     expect(expectedContent).not.toContain('--cwd')
   } finally {
-    if (previousUserProfile === undefined) {
-      delete process.env.USERPROFILE
-    } else {
-      process.env.USERPROFILE = previousUserProfile
-    }
     await rm(homeRoot, { recursive: true, force: true })
   }
 })

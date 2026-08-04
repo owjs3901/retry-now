@@ -370,6 +370,20 @@ export interface FrontendInstallResult {
   readonly personal: boolean
 }
 
+export interface FrontendInstallOptions {
+  /** project root for a project-scoped install; also the invocation cwd (default: `process.cwd()`) */
+  readonly cwd?: string
+  /** install into the user home instead of the project */
+  readonly personal?: boolean
+  /**
+   * user home for a personal install (default: `homedir()`). Explicit injection keeps a caller —
+   * a test above all — from writing into the real home, which `homedir()` resolves from a DIFFERENT
+   * environment variable per platform (`HOME` on POSIX, `USERPROFILE` on Windows) and so cannot be
+   * redirected portably.
+   */
+  readonly home?: string
+}
+
 /**
  * Materialise an agent's trigger file with a baked driver command. `driverBase` is the command
  * that runs the loop WITHOUT `--cwd` (e.g. `bun "/abs/driver-entry.ts"` or `bun "/abs/cli" run`);
@@ -378,14 +392,14 @@ export interface FrontendInstallResult {
 export async function installFrontend(
   agent: AgentKind,
   driverBase: string,
-  opts: { cwd?: string; personal?: boolean } = {},
+  opts: FrontendInstallOptions = {},
 ): Promise<FrontendInstallResult> {
   const cwd = opts.cwd ?? process.cwd()
   const personal = opts.personal ?? false
   const driverCommand = personal ? driverBase : `${driverBase} --cwd "${cwd}"`
   const file = buildFrontend(agent, driverCommand)
   const dest = personal
-    ? join(homedir(), file.homePath)
+    ? join(opts.home ?? homedir(), file.homePath)
     : join(cwd, file.projectPath)
   await mkdir(dirname(dest), { recursive: true })
   await writeFile(dest, file.content, 'utf8')

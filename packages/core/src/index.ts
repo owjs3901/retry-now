@@ -43,6 +43,7 @@ export {
   buildPluginStatusCommandFile,
   buildPluginStopCommandFile,
   type FrontendFile,
+  type FrontendInstallOptions,
   type FrontendInstallResult,
   installFrontend,
 } from './frontends.ts'
